@@ -2,7 +2,11 @@ import express from "express";
 import pino from "pino";
 
 import { config } from "./config.js";
-import { callDownstream } from "./downstream.js";
+import {
+  callDownstream,
+  DownstreamNotConfiguredError,
+  DownstreamRequestError,
+} from "./downstream.js";
 import { resolveRoute } from "./policy.js";
 import type { ChatCompletionsRequest } from "./types.js";
 
@@ -43,8 +47,56 @@ export const createApp = () => {
       backendTarget: route.backendTarget,
     });
 
-    const downstream = await callDownstream(body, route);
-    return res.status(200).json(downstream);
+    try {
+      const downstream = await callDownstream(body, route);
+      return res.status(200).json(downstream);
+    } catch (error) {
+      if (error instanceof DownstreamNotConfiguredError) {
+        logger.warn({
+          event: "mux.downstream_not_configured",
+          runtime,
+          message: error.message,
+        });
+
+        return res.status(503).json({
+          error: {
+            type: "service_unavailable",
+            message: error.message,
+          },
+        });
+      }
+
+      if (error instanceof DownstreamRequestError) {
+        logger.error({
+          event: "mux.downstream_error",
+          runtime,
+          status: error.status,
+          payload: error.payload,
+        });
+
+        return res.status(502).json({
+          error: {
+            type: "downstream_error",
+            message: "Downstream request failed",
+            status: error.status,
+            details: error.payload,
+          },
+        });
+      }
+
+      logger.error({
+        event: "mux.unhandled_error",
+        runtime,
+        err: error,
+      });
+
+      return res.status(500).json({
+        error: {
+          type: "internal_error",
+          message: "Unexpected server error",
+        },
+      });
+    }
   });
 
   return app;

@@ -76,8 +76,8 @@ This repo now includes a reviewable MVP skeleton with:
 - `GET /health`
 - simple rule-based routing/policy stub (requested model -> resolved model)
 - structured route decision logs
-- downstream passthrough abstraction (currently mock/stubbed)
-- unit tests for routing behavior
+- downstream passthrough abstraction (LiteLLM/OpenAI-compatible + explicit mock fallback)
+- unit tests for routing and downstream behavior
 
 ### Stack
 
@@ -98,6 +98,27 @@ npm run dev
 ```
 
 Server runs on `http://localhost:8787` by default.
+
+### Run with LiteLLM locally
+
+Mux expects an OpenAI-compatible backend and is tested against LiteLLM's `/v1/chat/completions` interface.
+
+1. Start LiteLLM (example):
+
+```bash
+litellm --host 0.0.0.0 --port 4000
+```
+
+2. In `.env`, point Mux to LiteLLM:
+
+```bash
+DOWNSTREAM_BASE_URL=http://localhost:4000/v1
+DOWNSTREAM_API_KEY= # optional
+DOWNSTREAM_TIMEOUT_MS=30000
+DOWNSTREAM_MOCK_FALLBACK=false
+```
+
+3. Start Mux (`npm run dev`) and send OpenAI-compatible requests to Mux.
 
 ### Test
 
@@ -122,7 +143,22 @@ curl -s http://localhost:8787/v1/chat/completions \
 - If `MODEL_MAP` includes the requested model, that mapping wins.
 - Else, `gpt-4o` is downgraded to `gpt-4o-mini` for simple prompts.
 - If prompt appears complex (basic keyword heuristic), model is kept.
-- Response is stubbed via `src/downstream.ts` but keeps OpenAI-compatible response shape.
+- If `DOWNSTREAM_BASE_URL` is set, Mux forwards to `${DOWNSTREAM_BASE_URL}/chat/completions` with the resolved model.
+- If `DOWNSTREAM_BASE_URL` is not set:
+  - and `DOWNSTREAM_MOCK_FALLBACK=true`, Mux returns an explicit local mock response (safe dev path)
+  - and `DOWNSTREAM_MOCK_FALLBACK=false`, Mux returns `503 service_unavailable`
+
+### Environment variables
+
+- `PORT` (default `8787`)
+- `NODE_ENV` (default `development`)
+- `MODEL_MAP` (JSON map for explicit model overrides)
+- `DEFAULT_PROVIDER` (metadata for logs)
+- `DEFAULT_BACKEND_TARGET` (metadata for logs)
+- `DOWNSTREAM_BASE_URL` (e.g. `http://localhost:4000/v1`)
+- `DOWNSTREAM_API_KEY` (optional bearer token)
+- `DOWNSTREAM_TIMEOUT_MS` (default `30000`)
+- `DOWNSTREAM_MOCK_FALLBACK` (default true outside production)
 
 ### Structured logging fields
 
