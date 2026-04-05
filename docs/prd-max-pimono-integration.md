@@ -1,61 +1,113 @@
-# PRD: Max / pi-mono integration for Mux (AgentWeave from day 1)
+# PRD: agent-max integration with Mux (AgentWeave from day 1)
 
 ## Goal
 
-Make Max (built on pi-mono) use Mux as its model routing layer before OpenClaw integration, while emitting AgentWeave-compatible telemetry from day one.
+Make **agent-max** use Mux as its model routing layer before OpenClaw integration, while preserving and extending AgentWeave visibility from day one.
 
 This should validate that Mux is truly cross-runtime and not just OpenClaw-specific glue.
 
-## Why Max first
+## Why agent-max first
 
-- pi-mono is lighter-weight and code-driven, so model routing integration is likely easier to reason about.
-- It provides a second runtime proving the architecture works beyond OpenClaw.
-- AgentWeave can then compare routing behavior across two runtimes.
+- `agent-max` is a real working runtime with a clean TypeScript codebase.
+- It already uses `@mariozechner/pi-ai`, so there is an explicit model/client integration point.
+- It already contains AgentWeave-related code (`src/tracing.ts`, `src/agentweave-context.ts`), which makes telemetry validation easier.
+- It is a better first integration target than OpenClaw because the code path is smaller and more directly controlled.
+
+## Repo / runtime reality
+
+Validated local repo:
+- Local path: `/home/Arnab/x-workspace/agent-max`
+- Git remote: `https://github.com/arniesaha/agent-max`
+
+Relevant files:
+- `src/agent.ts` — model creation and stream wrapper
+- `src/index.ts` — startup path
+- `src/tracing.ts` — AgentWeave tracing setup
+- `src/agentweave-context.ts` — session context tracking
+- `tests/tracing.test.ts` — current tracing test anchor
+
+## Current model path in agent-max
+
+Today, `agent-max` creates its model in `src/agent.ts` roughly like this:
+- chooses `DEFAULT_MODEL`
+- derives provider from model name (`claude*` → Anthropic, otherwise Google in current implementation)
+- calls `getModel(provider, defaultModel)` from `@mariozechner/pi-ai`
+- overrides provider base URLs for AgentWeave proxy if set:
+  - `ANTHROPIC_BASE_URL`
+  - `GOOGLE_GENAI_BASE_URL`
+- wraps `streamSimple()` with AgentWeave headers (`X-AgentWeave-*`)
+
+This means the likely Mux integration point is in `src/agent.ts`, at the model/base URL layer and/or request stream path.
 
 ## Success criteria
 
-1. Max/pi-mono sends model requests through Mux.
+1. `agent-max` sends model requests through Mux.
 2. Mux resolves requested vs resolved model and forwards to LiteLLM.
 3. AgentWeave receives routing metadata for the request.
 4. At least one routed request is visible end-to-end with:
-   - runtime=max or pi-mono
+   - runtime=`max` or `agent-max`
    - requested model
    - resolved model
    - route reason
    - provider/backend target
-5. No changes are required to OpenClaw for this milestone.
+5. Existing agent-max behavior remains intact aside from routing path changes.
+6. No OpenClaw changes are required for this milestone.
 
 ## Proposed integration shape
 
 ### Request path
-pi-mono / Max
+agent-max
 → Mux (`/v1/chat/completions`)
 → LiteLLM
 → provider/model
 
 ### Telemetry path
+agent-max
+→ AgentWeave spans (existing)
 Mux
-→ AgentWeave instrumentation
+→ routing metadata / route-decision spans
 
-## Required configuration surface
+The important thing is that both layers are observable:
+- agent-max still emits its runtime/agent spans
+- Mux emits the model routing decision
 
-For Max/pi-mono, we need a clean way to set:
+## Most likely implementation approach
+
+### Option A — OpenAI-compatible base URL override (preferred if pi-ai supports it cleanly)
+Configure agent-max so that its model calls target Mux as an OpenAI-compatible endpoint, while preserving the requested model name and AgentWeave headers.
+
+This is likely the simplest path if `@mariozechner/pi-ai` allows an OpenAI-compatible transport/base URL for the relevant provider path.
+
+### Option B — Custom wrapper around pi-ai stream path
+If direct base URL override is awkward across providers, add a narrow wrapper at the `streamSimple()` or model-client call site in `src/agent.ts` that sends requests to Mux explicitly.
+
+This should be used only if Option A is not clean enough.
+
+## Required configuration surface in agent-max
+
+Need a clean way to set:
 - Mux base URL
 - optional Mux API key if added later
 - default requested model
-- runtime identifier (`max`, `pi-mono`, or a more specific agent label)
-- AgentWeave session/agent context if available from caller side
+- runtime identifier header (e.g. `x-runtime: agent-max`)
+- AgentWeave session/agent context if useful to forward
+
+Likely env vars to introduce on the agent-max side:
+- `MUX_BASE_URL`
+- `MUX_API_KEY` (optional, future-safe)
+- maybe `MUX_ENABLED=true|false`
 
 ## Implementation tasks
 
-1. Identify the current pi-mono model client abstraction and where the OpenAI-compatible base URL can be swapped.
-2. Add Mux as a configurable backend for Max.
-3. Ensure Max includes a runtime identifier/header (e.g. `x-runtime: max`).
-4. Verify requested model from Max reaches Mux correctly.
-5. Add/verify Mux → LiteLLM forwarding.
-6. Add Mux routing telemetry fields needed for AgentWeave.
+1. Inspect exactly how `@mariozechner/pi-ai` handles provider base URLs / OpenAI-compatible endpoints in agent-max.
+2. Add Mux as a configurable backend in `src/agent.ts`.
+3. Ensure agent-max includes runtime identifier/header (e.g. `x-runtime: agent-max`).
+4. Verify requested model from agent-max reaches Mux correctly.
+5. Verify Mux → LiteLLM forwarding works.
+6. Add/verify Mux routing telemetry fields needed for AgentWeave.
 7. Validate one real request end-to-end.
-8. Document setup and known limitations.
+8. Add or extend tests if feasible.
+9. Document setup and known limitations.
 
 ## Telemetry requirements for AgentWeave
 
@@ -78,21 +130,23 @@ Later additions:
 
 ## Risks / unknowns
 
-- The exact pi-mono integration point may differ from earlier planning notes.
-- If Max uses provider-specific features beyond OpenAI-compatible chat, Mux may need a compatibility layer.
-- AgentWeave instrumentation may be easiest to add in Mux first, then enrich later.
+- `@mariozechner/pi-ai` may not expose one clean provider-agnostic override path for Mux.
+- agent-max currently infers provider somewhat simplistically (`claude*` vs Google), which may need refinement once Mux supports broader routing.
+- If agent-max depends on provider-specific features beyond OpenAI-compatible chat, Mux may need a compatibility layer later.
+- AgentWeave instrumentation may be easiest to enrich in Mux first, then correlate with agent-max runtime spans.
 
 ## Non-goals
 
-- Full Max refactor
+- Full agent-max refactor
 - Perfect routing policy
 - OpenClaw integration in the same milestone
 - Multi-turn policy optimization
+- Replacing pi-ai internals wholesale
 
 ## Deliverables
 
-- Max configured to call Mux locally
-- One end-to-end validated routed request
+- agent-max configured to call Mux locally
+- one end-to-end validated routed request
 - AgentWeave-visible routing metadata
-- Setup docs
-- Follow-up issues for anything still missing
+- setup docs
+- follow-up issues for anything still missing
