@@ -159,6 +159,42 @@ let anthropicClientKey: string | null = null;
 
 const CLAUDE_CODE_VERSION = "2.1.62";
 
+const stringifyUnknown = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const normalizeContentToText = (content: unknown): string => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          const p = part as Record<string, unknown>;
+          if (typeof p.text === "string") return p.text;
+          if (typeof p.content === "string") return p.content;
+          if (p.type === "input_text" && typeof p.text === "string") return p.text;
+          if (p.type === "text" && typeof p.text === "string") return p.text;
+        }
+        return stringifyUnknown(part);
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (content && typeof content === "object") {
+    const c = content as Record<string, unknown>;
+    if (typeof c.text === "string") return c.text;
+    if (typeof c.content === "string") return c.content;
+  }
+  return stringifyUnknown(content);
+};
+
 const getAnthropicClient = (): Anthropic => {
   const oauthToken = config.anthropicOauthToken?.trim();
   const apiKey = config.anthropicApiKey?.trim();
@@ -203,20 +239,28 @@ const getAnthropicClient = (): Anthropic => {
 
 const toAnthropicInput = (req: ChatCompletionsRequest): {
   system?: string;
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  messages: Array<{ role: "user" | "assistant"; content: Array<{ type: "text"; text: string }> }>;
 } => {
   const system = req.messages
     .filter((m) => m.role === "system")
-    .map((m) => m.content)
+    .map((m) => normalizeContentToText(m.content))
     .join("\n\n")
     .trim();
 
   const messages = req.messages
     .filter((m) => m.role !== "system")
-    .map((m) => ({
-      role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-      content: m.role === "tool" ? `[tool]\n${m.content}` : m.content,
-    }));
+    .map((m) => {
+      const text = normalizeContentToText(m.content);
+      return {
+        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+        content: [
+          {
+            type: "text" as const,
+            text: m.role === "tool" ? `[tool]\n${text}` : text,
+          },
+        ],
+      };
+    });
 
   return { system: system || undefined, messages };
 };
