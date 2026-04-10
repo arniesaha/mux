@@ -7,8 +7,25 @@ const containsEscalationCue = (text: string): boolean => {
   return cues.some((cue) => lower.includes(cue));
 };
 
+const isAnthropicModel = (model: string): boolean => {
+  return model.toLowerCase().startsWith("claude-");
+};
+
 export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
   const requestedModel = req.model;
+
+  if (isAnthropicModel(requestedModel)) {
+    const anthropicMapped = config.anthropicModelMap[requestedModel];
+    if (anthropicMapped) {
+      return {
+        requestedModel,
+        resolvedModel: anthropicMapped,
+        routeReason: "config:anthropic_model_map_override",
+        provider: config.defaultProvider,
+        backendTarget: config.defaultBackendTarget,
+      };
+    }
+  }
 
   const mapped = config.modelMap[requestedModel];
   if (mapped) {
