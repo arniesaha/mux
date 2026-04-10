@@ -158,22 +158,25 @@ let anthropicClient: Anthropic | null = null;
 let anthropicClientKey: string | null = null;
 
 const getAnthropicClient = (): Anthropic => {
-  const token = config.anthropicOauthToken?.trim() || config.anthropicApiKey?.trim();
+  const oauthToken = config.anthropicOauthToken?.trim();
+  const apiKey = config.anthropicApiKey?.trim();
   const baseURL = config.anthropicBaseUrl || config.downstreamBaseUrl || undefined;
 
-  if (!token) {
+  if (!oauthToken && !apiKey) {
     throw new DownstreamNotConfiguredError(
       "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY is required when DOWNSTREAM_MODE=anthropic-sdk",
     );
   }
 
-  const cacheKey = `${baseURL ?? "default"}|${token}`;
+  const authKind = oauthToken ? "oauth" : "apiKey";
+  const authValue = oauthToken || apiKey!;
+  const cacheKey = `${baseURL ?? "default"}|${authKind}|${authValue}`;
   if (anthropicClient && anthropicClientKey === cacheKey) {
     return anthropicClient;
   }
 
   anthropicClient = new Anthropic({
-    apiKey: token,
+    ...(oauthToken ? { authToken: oauthToken } : { apiKey: apiKey! }),
     baseURL,
     timeout: config.downstreamTimeoutMs,
   });
