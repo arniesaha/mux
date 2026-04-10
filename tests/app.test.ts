@@ -1,10 +1,17 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
 import { config } from "../src/config.js";
 
 describe("createApp", () => {
+  beforeAll(() => {
+    config.downstreamMode = "openai-compatible";
+    config.downstreamBaseUrl = null;
+    config.downstreamMockFallbackEnabled = true;
+    config.modelMap = {};
+  });
+
   const app = createApp();
 
   it("returns health status", async () => {
@@ -18,9 +25,7 @@ describe("createApp", () => {
   });
 
   it("rejects invalid chat completions payloads", async () => {
-    const res = await request(app)
-      .post("/v1/chat/completions")
-      .send({ messages: [] });
+    const res = await request(app).post("/v1/chat/completions").send({ messages: [] });
 
     expect(res.status).toBe(400);
     expect(res.body.error.type).toBe("invalid_request_error");
@@ -61,12 +66,10 @@ describe("createApp", () => {
     config.downstreamBaseUrl = null;
     config.downstreamMockFallbackEnabled = false;
 
-    const res = await request(app)
-      .post("/v1/chat/completions")
-      .send({
-        model: "gpt-4o",
-        messages: [{ role: "user", content: "hello" }],
-      });
+    const res = await request(app).post("/v1/chat/completions").send({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hello" }],
+    });
 
     expect(res.status).toBe(503);
     expect(res.body.error.type).toBe("service_unavailable");

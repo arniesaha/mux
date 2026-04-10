@@ -112,6 +112,7 @@ litellm --host 0.0.0.0 --port 4000
 2. In `.env`, point Mux to LiteLLM:
 
 ```bash
+DOWNSTREAM_MODE=openai-compatible
 DOWNSTREAM_BASE_URL=http://localhost:4000/v1
 DOWNSTREAM_API_KEY= # optional, based on auth mode
 DOWNSTREAM_AUTH_MODE=bearer
@@ -121,6 +122,23 @@ DOWNSTREAM_MOCK_FALLBACK=false
 ```
 
 3. Start Mux (`npm run dev`) and send OpenAI-compatible requests to Mux.
+
+### Run with Anthropic OAuth via Node SDK (Option 2)
+
+This path is for Anthropic OAuth tokens (`sk-ant-oat01-*`) where raw HTTP/curl-style calls are not reliable.
+Mux uses the official `@anthropic-ai/sdk` directly.
+
+```bash
+DOWNSTREAM_MODE=anthropic-sdk
+ANTHROPIC_OAUTH_TOKEN=sk-ant-oat01-...
+ANTHROPIC_BASE_URL=http://192.168.1.70:30400
+DOWNSTREAM_TIMEOUT_MS=30000
+```
+
+Notes:
+- Keep sending OpenAI-compatible requests to Mux (`/v1/chat/completions`); Mux translates to Anthropic Messages API internally.
+- `ANTHROPIC_API_KEY` can be used instead of `ANTHROPIC_OAUTH_TOKEN` for non-OAuth setups.
+- In `anthropic-sdk` mode, LiteLLM/OpenAI downstream auth settings are ignored.
 
 ### Test
 
@@ -145,16 +163,21 @@ curl -s http://localhost:8787/v1/chat/completions \
 - If `MODEL_MAP` includes the requested model, that mapping wins.
 - Else, `gpt-4o` is downgraded to `gpt-4o-mini` for simple prompts.
 - If prompt appears complex (basic keyword heuristic), model is kept.
-- If `DOWNSTREAM_BASE_URL` is set, Mux forwards to `${DOWNSTREAM_BASE_URL}/chat/completions` with the resolved model.
-- Downstream auth is configurable via `DOWNSTREAM_AUTH_MODE`:
-  - `bearer` (default): `Authorization: Bearer ${DOWNSTREAM_API_KEY}`
-  - `x-api-key`: `x-api-key: ${DOWNSTREAM_API_KEY}`
-  - `passthrough`: forwards inbound `Authorization` header as-is
-  - `none`: no auth header
-- Optional static headers can be added with `DOWNSTREAM_EXTRA_HEADERS` (JSON map).
-- If `DOWNSTREAM_BASE_URL` is not set:
-  - and `DOWNSTREAM_MOCK_FALLBACK=true`, Mux returns an explicit local mock response (safe dev path)
-  - and `DOWNSTREAM_MOCK_FALLBACK=false`, Mux returns `503 service_unavailable`
+- `DOWNSTREAM_MODE=openai-compatible` (default):
+  - If `DOWNSTREAM_BASE_URL` is set, Mux forwards to `${DOWNSTREAM_BASE_URL}/chat/completions` with the resolved model.
+  - Downstream auth is configurable via `DOWNSTREAM_AUTH_MODE`:
+    - `bearer` (default): `Authorization: Bearer ${DOWNSTREAM_API_KEY}`
+    - `x-api-key`: `x-api-key: ${DOWNSTREAM_API_KEY}`
+    - `passthrough`: forwards inbound `Authorization` header as-is
+    - `none`: no auth header
+  - Optional static headers can be added with `DOWNSTREAM_EXTRA_HEADERS` (JSON map).
+  - If `DOWNSTREAM_BASE_URL` is not set:
+    - and `DOWNSTREAM_MOCK_FALLBACK=true`, Mux returns an explicit local mock response (safe dev path)
+    - and `DOWNSTREAM_MOCK_FALLBACK=false`, Mux returns `503 service_unavailable`
+- `DOWNSTREAM_MODE=anthropic-sdk`:
+  - Mux calls Anthropic via Node SDK (`@anthropic-ai/sdk`) using `ANTHROPIC_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`).
+  - Optional `ANTHROPIC_BASE_URL` supports proxy endpoints like `http://192.168.1.70:30400`.
+  - Current limitations: no streaming support yet and chat role mapping is text-only (system/user/assistant; `tool` is flattened to text).
 
 ### Environment variables
 
@@ -163,12 +186,16 @@ curl -s http://localhost:8787/v1/chat/completions \
 - `MODEL_MAP` (JSON map for explicit model overrides)
 - `DEFAULT_PROVIDER` (metadata for logs)
 - `DEFAULT_BACKEND_TARGET` (metadata for logs)
-- `DOWNSTREAM_BASE_URL` (e.g. `http://localhost:4000/v1`)
-- `DOWNSTREAM_API_KEY` (optional key/token for downstream auth)
+- `DOWNSTREAM_MODE` (`openai-compatible` default, `anthropic-sdk`)
+- `DOWNSTREAM_BASE_URL` (e.g. `http://localhost:4000/v1`, openai-compatible mode)
+- `DOWNSTREAM_API_KEY` (optional key/token for openai-compatible mode)
 - `DOWNSTREAM_AUTH_MODE` (`bearer` default, `x-api-key`, `passthrough`, `none`)
 - `DOWNSTREAM_EXTRA_HEADERS` (JSON map, optional extra headers)
 - `DOWNSTREAM_TIMEOUT_MS` (default `30000`)
-- `DOWNSTREAM_MOCK_FALLBACK` (default true outside production)
+- `DOWNSTREAM_MOCK_FALLBACK` (default true outside production, openai-compatible mode)
+- `ANTHROPIC_OAUTH_TOKEN` (preferred in anthropic-sdk mode)
+- `ANTHROPIC_API_KEY` (optional fallback in anthropic-sdk mode)
+- `ANTHROPIC_BASE_URL` (optional override/proxy URL in anthropic-sdk mode)
 
 ### Structured logging fields
 

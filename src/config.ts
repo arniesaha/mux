@@ -26,6 +26,7 @@ const normalizeBaseUrl = (input: string | undefined): string | null => {
 };
 
 type DownstreamAuthMode = "none" | "bearer" | "x-api-key" | "passthrough";
+type DownstreamMode = "openai-compatible" | "anthropic-sdk";
 
 const parseDownstreamAuthMode = (input: string | undefined): DownstreamAuthMode => {
   const normalized = input?.trim().toLowerCase();
@@ -34,6 +35,12 @@ const parseDownstreamAuthMode = (input: string | undefined): DownstreamAuthMode 
   if (normalized === "x-api-key") return "x-api-key";
   if (normalized === "passthrough") return "passthrough";
   return "bearer";
+};
+
+const parseDownstreamMode = (input: string | undefined): DownstreamMode => {
+  const normalized = input?.trim().toLowerCase();
+  if (normalized === "anthropic-sdk") return "anthropic-sdk";
+  return "openai-compatible";
 };
 
 const parseJsonMap = (input: string | undefined): Record<string, string> => {
@@ -61,9 +68,13 @@ export const config = {
   defaultBackendTarget:
     process.env.DEFAULT_BACKEND_TARGET ?? "mock://downstream-chat-completions",
   modelMap: parseModelMap(process.env.MODEL_MAP),
+  downstreamMode: parseDownstreamMode(process.env.DOWNSTREAM_MODE),
   downstreamBaseUrl: normalizeBaseUrl(process.env.DOWNSTREAM_BASE_URL),
   downstreamApiKey: process.env.DOWNSTREAM_API_KEY,
   downstreamAuthMode: parseDownstreamAuthMode(process.env.DOWNSTREAM_AUTH_MODE),
+  anthropicBaseUrl: normalizeBaseUrl(process.env.ANTHROPIC_BASE_URL),
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+  anthropicOauthToken: process.env.ANTHROPIC_OAUTH_TOKEN,
   downstreamTimeoutMs: parseNumber(process.env.DOWNSTREAM_TIMEOUT_MS, 30_000),
   downstreamExtraHeaders: parseJsonMap(process.env.DOWNSTREAM_EXTRA_HEADERS),
   downstreamMockFallbackEnabled: parseBoolean(
