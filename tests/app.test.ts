@@ -47,6 +47,22 @@ describe("createApp", () => {
     expect(res.body.choices?.[0]?.message?.content).toContain("resolved=gpt-4o-mini");
   });
 
+  it("returns OpenAI-compatible SSE chunks when stream=true", async () => {
+    const res = await request(app)
+      .post("/v1/chat/completions")
+      .send({
+        model: "gpt-4o",
+        stream: true,
+        messages: [{ role: "user", content: "say hi" }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    expect(res.text).toContain("\"object\":\"chat.completion.chunk\"");
+    expect(res.text).toContain("\"delta\":{\"role\":\"assistant\"");
+    expect(res.text).toContain("data: [DONE]");
+  });
+
   it("keeps the stronger model for complex prompts", async () => {
     const res = await request(app)
       .post("/v1/chat/completions")
