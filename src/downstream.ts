@@ -84,19 +84,48 @@ const parseJsonSafely = async (response: Response): Promise<unknown> => {
   }
 };
 
+export type DownstreamRequestContext = {
+  incomingAuthorizationHeader?: string;
+};
+
+const resolveAuthHeader = (context?: DownstreamRequestContext): string | null => {
+  if (config.downstreamAuthMode === "none") return null;
+
+  if (config.downstreamAuthMode === "passthrough") {
+    const value = context?.incomingAuthorizationHeader?.trim();
+    return value ? value : null;
+  }
+
+  const token = config.downstreamApiKey?.trim();
+  if (!token) return null;
+
+  if (config.downstreamAuthMode === "x-api-key") {
+    return token;
+  }
+
+  return `Bearer ${token}`;
+};
+
 const callLiteLLM = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
+  context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    ...config.downstreamExtraHeaders,
   };
 
-  if (config.downstreamApiKey) {
-    headers.authorization = `Bearer ${config.downstreamApiKey}`;
+  const authHeader = resolveAuthHeader(context);
+  if (authHeader) {
+    if (config.downstreamAuthMode === "x-api-key") {
+      headers["x-api-key"] = authHeader;
+    } else {
+      headers.authorization = authHeader;
+    }
   }
 
   const payload = {
@@ -125,6 +154,7 @@ const callLiteLLM = async (
 export const callDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
+  context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
   if (!config.downstreamBaseUrl) {
     if (config.downstreamMockFallbackEnabled) {
@@ -136,5 +166,5 @@ export const callDownstream = async (
     );
   }
 
-  return callLiteLLM(req, route);
+  return callLiteLLM(req, route, context);
 };

@@ -3,21 +3,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const parseModelMap = (input: string | undefined): Record<string, string> => {
-  if (!input) return {};
-
-  try {
-    const parsed = JSON.parse(input);
-    if (parsed && typeof parsed === "object") {
-      const entries = Object.entries(parsed).filter(
-        ([k, v]) => typeof k === "string" && typeof v === "string",
-      ) as Array<[string, string]>;
-      return Object.fromEntries(entries);
-    }
-  } catch {
-    // ignore invalid map and fall back to empty map
-  }
-
-  return {};
+  return parseJsonMap(input);
 };
 
 const parseBoolean = (input: string | undefined, defaultValue: boolean): boolean => {
@@ -39,6 +25,35 @@ const normalizeBaseUrl = (input: string | undefined): string | null => {
   return input.replace(/\/+$/, "");
 };
 
+type DownstreamAuthMode = "none" | "bearer" | "x-api-key" | "passthrough";
+
+const parseDownstreamAuthMode = (input: string | undefined): DownstreamAuthMode => {
+  const normalized = input?.trim().toLowerCase();
+
+  if (normalized === "none") return "none";
+  if (normalized === "x-api-key") return "x-api-key";
+  if (normalized === "passthrough") return "passthrough";
+  return "bearer";
+};
+
+const parseJsonMap = (input: string | undefined): Record<string, string> => {
+  if (!input) return {};
+
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === "object") {
+      const entries = Object.entries(parsed).filter(
+        ([k, v]) => typeof k === "string" && typeof v === "string",
+      ) as Array<[string, string]>;
+      return Object.fromEntries(entries);
+    }
+  } catch {
+    // ignore invalid map and fall back to empty map
+  }
+
+  return {};
+};
+
 export const config = {
   port: Number(process.env.PORT ?? 8787),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -48,7 +63,9 @@ export const config = {
   modelMap: parseModelMap(process.env.MODEL_MAP),
   downstreamBaseUrl: normalizeBaseUrl(process.env.DOWNSTREAM_BASE_URL),
   downstreamApiKey: process.env.DOWNSTREAM_API_KEY,
+  downstreamAuthMode: parseDownstreamAuthMode(process.env.DOWNSTREAM_AUTH_MODE),
   downstreamTimeoutMs: parseNumber(process.env.DOWNSTREAM_TIMEOUT_MS, 30_000),
+  downstreamExtraHeaders: parseJsonMap(process.env.DOWNSTREAM_EXTRA_HEADERS),
   downstreamMockFallbackEnabled: parseBoolean(
     process.env.DOWNSTREAM_MOCK_FALLBACK,
     process.env.NODE_ENV !== "production",

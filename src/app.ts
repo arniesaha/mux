@@ -6,6 +6,7 @@ import {
   callDownstream,
   DownstreamNotConfiguredError,
   DownstreamRequestError,
+  type DownstreamRequestContext,
 } from "./downstream.js";
 import { resolveRoute } from "./policy.js";
 import type { ChatCompletionsRequest } from "./types.js";
@@ -48,7 +49,11 @@ export const createApp = () => {
     });
 
     try {
-      const downstream = await callDownstream(body, route);
+      const downstreamContext: DownstreamRequestContext = {
+        incomingAuthorizationHeader: req.header("authorization") ?? undefined,
+      };
+
+      const downstream = await callDownstream(body, route, downstreamContext);
       return res.status(200).json(downstream);
     } catch (error) {
       if (error instanceof DownstreamNotConfiguredError) {
