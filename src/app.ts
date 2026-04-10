@@ -15,6 +15,80 @@ const logger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
 });
 
+function streamChatCompletion(res: express.Response, completion: {
+  id: string;
+  created: number;
+  model: string;
+  choices?: Array<{
+    message?: { role?: "assistant"; content?: string };
+    finish_reason?: string;
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}) {
+  const text = completion.choices?.[0]?.message?.content ?? "";
+  const finishReason = completion.choices?.[0]?.finish_reason ?? "stop";
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  const writeChunk = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  // Emit one content delta chunk. This is enough for OpenAI-compatible stream consumers.
+  writeChunk({
+    id: completion.id,
+    object: "chat.completion.chunk",
+    created: completion.created,
+    model: completion.model,
+    choices: [
+      {
+        index: 0,
+        delta: {
+          role: "assistant",
+          content: text,
+        },
+        finish_reason: null,
+      },
+    ],
+  });
+
+  // Emit final stop chunk.
+  writeChunk({
+    id: completion.id,
+    object: "chat.completion.chunk",
+    created: completion.created,
+    model: completion.model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: finishReason,
+      },
+    ],
+  });
+
+  if (completion.usage) {
+    writeChunk({
+      id: completion.id,
+      object: "chat.completion.chunk",
+      created: completion.created,
+      model: completion.model,
+      choices: [],
+      usage: completion.usage,
+    });
+  }
+
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
 export const createApp = () => {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -55,6 +129,12 @@ export const createApp = () => {
       };
 
       const downstream = await callDownstream(body, route, downstreamContext);
+
+      if (body.stream) {
+        streamChatCompletion(res, downstream);
+        return;
+      }
+
       return res.status(200).json(downstream);
     } catch (error) {
       if (error instanceof DownstreamNotConfiguredError) {
