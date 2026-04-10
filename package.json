@@ -12,6 +12,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.54.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "pino": "^9.3.2"

@@ -23,11 +23,13 @@ afterEach(() => {
 
 describe("callDownstream", () => {
   it("calls LiteLLM-compatible endpoint when configured", async () => {
+    const previousMode = config.downstreamMode;
     const previousBaseUrl = config.downstreamBaseUrl;
     const previousApiKey = config.downstreamApiKey;
     const previousAuthMode = config.downstreamAuthMode;
     const previousExtraHeaders = config.downstreamExtraHeaders;
 
+    config.downstreamMode = "openai-compatible";
     config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
     config.downstreamApiKey = "test-key";
     config.downstreamAuthMode = "bearer";
@@ -65,6 +67,7 @@ describe("callDownstream", () => {
 
     expect(response.model).toBe("gpt-4o-mini");
 
+    config.downstreamMode = previousMode;
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamApiKey = previousApiKey;
     config.downstreamAuthMode = previousAuthMode;
@@ -72,10 +75,12 @@ describe("callDownstream", () => {
   });
 
   it("supports x-api-key auth mode for downstream", async () => {
+    const previousMode = config.downstreamMode;
     const previousBaseUrl = config.downstreamBaseUrl;
     const previousApiKey = config.downstreamApiKey;
     const previousAuthMode = config.downstreamAuthMode;
 
+    config.downstreamMode = "openai-compatible";
     config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
     config.downstreamApiKey = "abc123";
     config.downstreamAuthMode = "x-api-key";
@@ -106,15 +111,18 @@ describe("callDownstream", () => {
     expect(headers["x-api-key"]).toBe("abc123");
     expect(headers.authorization).toBeUndefined();
 
+    config.downstreamMode = previousMode;
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamApiKey = previousApiKey;
     config.downstreamAuthMode = previousAuthMode;
   });
 
   it("supports passthrough auth mode", async () => {
+    const previousMode = config.downstreamMode;
     const previousBaseUrl = config.downstreamBaseUrl;
     const previousAuthMode = config.downstreamAuthMode;
 
+    config.downstreamMode = "openai-compatible";
     config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
     config.downstreamAuthMode = "passthrough";
 
@@ -145,14 +153,68 @@ describe("callDownstream", () => {
     const headers = requestInit.headers as Record<string, string>;
     expect(headers.authorization).toBe("Bearer passthrough-token");
 
+    config.downstreamMode = previousMode;
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamAuthMode = previousAuthMode;
   });
 
+  it("uses Anthropic SDK adapter when enabled", async () => {
+    const previousMode = config.downstreamMode;
+    const previousOauthToken = config.anthropicOauthToken;
+    const previousApiKey = config.anthropicApiKey;
+    const previousAnthropicBaseUrl = config.anthropicBaseUrl;
+
+    config.downstreamMode = "anthropic-sdk";
+    config.anthropicOauthToken = "sk-ant-oat01-test";
+    config.anthropicApiKey = undefined;
+    config.anthropicBaseUrl = "http://127.0.0.1:30400";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "msg_123",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "hello from claude" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const response = await callDownstream(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "say hi" }],
+      },
+      {
+        ...route,
+        requestedModel: "claude-sonnet-4-6",
+        resolvedModel: "claude-sonnet-4-6",
+      },
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const firstArg = String(fetchSpy.mock.calls[0]?.[0]);
+    expect(firstArg).toContain("/v1/messages");
+    expect(response.model).toBe("claude-sonnet-4-6");
+    expect(response.choices[0]?.message.content).toBe("hello from claude");
+
+    config.downstreamMode = previousMode;
+    config.anthropicOauthToken = previousOauthToken;
+    config.anthropicApiKey = previousApiKey;
+    config.anthropicBaseUrl = previousAnthropicBaseUrl;
+  });
+
   it("throws when not configured and fallback disabled", async () => {
+    const previousMode = config.downstreamMode;
     const previousBaseUrl = config.downstreamBaseUrl;
     const previousFallback = config.downstreamMockFallbackEnabled;
 
+    config.downstreamMode = "openai-compatible";
     config.downstreamBaseUrl = null;
     config.downstreamMockFallbackEnabled = false;
 
@@ -160,6 +222,7 @@ describe("callDownstream", () => {
       DownstreamNotConfiguredError,
     );
 
+    config.downstreamMode = previousMode;
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamMockFallbackEnabled = previousFallback;
   });

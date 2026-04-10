@@ -46,6 +46,7 @@ export const createApp = () => {
       routeReason: route.routeReason,
       provider: route.provider,
       backendTarget: route.backendTarget,
+      downstreamMode: config.downstreamMode,
     });
 
     try {

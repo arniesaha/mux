@@ -1,3 +1,6 @@
+import Anthropic from "@anthropic-ai/sdk";
+import type { Message } from "@anthropic-ai/sdk/resources/messages/messages";
+
 import { config } from "./config.js";
 import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
 
@@ -22,7 +25,7 @@ export type DownstreamResponse = {
 };
 
 export class DownstreamNotConfiguredError extends Error {
-  constructor(message = "LiteLLM downstream is not configured") {
+  constructor(message = "Downstream is not configured") {
     super(message);
     this.name = "DownstreamNotConfiguredError";
   }
@@ -106,7 +109,7 @@ const resolveAuthHeader = (context?: DownstreamRequestContext): string | null =>
   return `Bearer ${token}`;
 };
 
-const callLiteLLM = async (
+const callOpenAICompatible = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   context?: DownstreamRequestContext,
@@ -151,11 +154,126 @@ const callLiteLLM = async (
   }
 };
 
+let anthropicClient: Anthropic | null = null;
+let anthropicClientKey: string | null = null;
+
+const getAnthropicClient = (): Anthropic => {
+  const oauthToken = config.anthropicOauthToken?.trim();
+  const apiKey = config.anthropicApiKey?.trim();
+  const baseURL = config.anthropicBaseUrl || config.downstreamBaseUrl || undefined;
+
+  if (!oauthToken && !apiKey) {
+    throw new DownstreamNotConfiguredError(
+      "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY is required when DOWNSTREAM_MODE=anthropic-sdk",
+    );
+  }
+
+  const authKind = oauthToken ? "oauth" : "apiKey";
+  const authValue = oauthToken || apiKey!;
+  const cacheKey = `${baseURL ?? "default"}|${authKind}|${authValue}`;
+  if (anthropicClient && anthropicClientKey === cacheKey) {
+    return anthropicClient;
+  }
+
+  anthropicClient = new Anthropic({
+    ...(oauthToken ? { authToken: oauthToken } : { apiKey: apiKey! }),
+    baseURL,
+    timeout: config.downstreamTimeoutMs,
+  });
+  anthropicClientKey = cacheKey;
+
+  return anthropicClient;
+};
+
+const toAnthropicInput = (req: ChatCompletionsRequest): {
+  system?: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+} => {
+  const system = req.messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n\n")
+    .trim();
+
+  const messages = req.messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+      content: m.role === "tool" ? `[tool]\n${m.content}` : m.content,
+    }));
+
+  return { system: system || undefined, messages };
+};
+
+const toOpenAIResponse = (response: Message, model: string): DownstreamResponse => {
+  const text = response.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+
+  const inputTokens = response.usage.input_tokens;
+  const outputTokens = response.usage.output_tokens;
+
+  return {
+    id: response.id,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: text,
+        },
+        finish_reason: response.stop_reason ?? "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    },
+  };
+};
+
+const callAnthropicSdk = async (
+  req: ChatCompletionsRequest,
+  route: RouteDecision,
+): Promise<DownstreamResponse> => {
+  const client = getAnthropicClient();
+  const { system, messages } = toAnthropicInput(req);
+
+  try {
+    const response = await client.messages.create({
+      model: route.resolvedModel,
+      max_tokens: req.max_tokens ?? 1024,
+      temperature: req.temperature,
+      system,
+      messages,
+      stream: false,
+    });
+
+    return toOpenAIResponse(response, route.resolvedModel);
+  } catch (error) {
+    if (error instanceof Anthropic.APIError) {
+      throw new DownstreamRequestError(error.status ?? 500, error.error ?? error.message);
+    }
+
+    throw error;
+  }
+};
+
 export const callDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
+  if (config.downstreamMode === "anthropic-sdk") {
+    return callAnthropicSdk(req, route);
+  }
+
   if (!config.downstreamBaseUrl) {
     if (config.downstreamMockFallbackEnabled) {
       return buildMockResponse(req, route);
@@ -166,5 +284,5 @@ export const callDownstream = async (
     );
   }
 
-  return callLiteLLM(req, route, context);
+  return callOpenAICompatible(req, route, context);
 };
