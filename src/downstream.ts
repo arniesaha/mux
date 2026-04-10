@@ -157,6 +157,8 @@ const callOpenAICompatible = async (
 let anthropicClient: Anthropic | null = null;
 let anthropicClientKey: string | null = null;
 
+const CLAUDE_CODE_VERSION = "2.1.62";
+
 const getAnthropicClient = (): Anthropic => {
   const oauthToken = config.anthropicOauthToken?.trim();
   const apiKey = config.anthropicApiKey?.trim();
@@ -176,9 +178,23 @@ const getAnthropicClient = (): Anthropic => {
   }
 
   anthropicClient = new Anthropic({
-    ...(oauthToken ? { authToken: oauthToken } : { apiKey: apiKey! }),
+    ...(oauthToken ? { authToken: oauthToken, apiKey: null } : { apiKey: apiKey! }),
     baseURL,
     timeout: config.downstreamTimeoutMs,
+    dangerouslyAllowBrowser: true,
+    defaultHeaders: oauthToken
+      ? {
+          accept: "application/json",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+          "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
+          "x-app": "cli",
+        }
+      : {
+          accept: "application/json",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+        },
   });
   anthropicClientKey = cacheKey;
 
@@ -244,13 +260,20 @@ const callAnthropicSdk = async (
 ): Promise<DownstreamResponse> => {
   const client = getAnthropicClient();
   const { system, messages } = toAnthropicInput(req);
+  const isOauth = Boolean(config.anthropicOauthToken?.trim());
+  const systemBlocks = isOauth
+    ? [
+        { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        ...(system ? [{ type: "text" as const, text: system }] : []),
+      ]
+    : system;
 
   try {
     const response = await client.messages.create({
       model: route.resolvedModel,
       max_tokens: req.max_tokens ?? 1024,
       temperature: req.temperature,
-      system,
+      system: systemBlocks as any,
       messages,
       stream: false,
     });
