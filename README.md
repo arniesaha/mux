@@ -113,7 +113,9 @@ litellm --host 0.0.0.0 --port 4000
 
 ```bash
 DOWNSTREAM_BASE_URL=http://localhost:4000/v1
-DOWNSTREAM_API_KEY= # optional
+DOWNSTREAM_API_KEY= # optional, based on auth mode
+DOWNSTREAM_AUTH_MODE=bearer
+DOWNSTREAM_EXTRA_HEADERS={}
 DOWNSTREAM_TIMEOUT_MS=30000
 DOWNSTREAM_MOCK_FALLBACK=false
 ```
@@ -144,6 +146,12 @@ curl -s http://localhost:8787/v1/chat/completions \
 - Else, `gpt-4o` is downgraded to `gpt-4o-mini` for simple prompts.
 - If prompt appears complex (basic keyword heuristic), model is kept.
 - If `DOWNSTREAM_BASE_URL` is set, Mux forwards to `${DOWNSTREAM_BASE_URL}/chat/completions` with the resolved model.
+- Downstream auth is configurable via `DOWNSTREAM_AUTH_MODE`:
+  - `bearer` (default): `Authorization: Bearer ${DOWNSTREAM_API_KEY}`
+  - `x-api-key`: `x-api-key: ${DOWNSTREAM_API_KEY}`
+  - `passthrough`: forwards inbound `Authorization` header as-is
+  - `none`: no auth header
+- Optional static headers can be added with `DOWNSTREAM_EXTRA_HEADERS` (JSON map).
 - If `DOWNSTREAM_BASE_URL` is not set:
   - and `DOWNSTREAM_MOCK_FALLBACK=true`, Mux returns an explicit local mock response (safe dev path)
   - and `DOWNSTREAM_MOCK_FALLBACK=false`, Mux returns `503 service_unavailable`
@@ -156,7 +164,9 @@ curl -s http://localhost:8787/v1/chat/completions \
 - `DEFAULT_PROVIDER` (metadata for logs)
 - `DEFAULT_BACKEND_TARGET` (metadata for logs)
 - `DOWNSTREAM_BASE_URL` (e.g. `http://localhost:4000/v1`)
-- `DOWNSTREAM_API_KEY` (optional bearer token)
+- `DOWNSTREAM_API_KEY` (optional key/token for downstream auth)
+- `DOWNSTREAM_AUTH_MODE` (`bearer` default, `x-api-key`, `passthrough`, `none`)
+- `DOWNSTREAM_EXTRA_HEADERS` (JSON map, optional extra headers)
 - `DOWNSTREAM_TIMEOUT_MS` (default `30000`)
 - `DOWNSTREAM_MOCK_FALLBACK` (default true outside production)
 

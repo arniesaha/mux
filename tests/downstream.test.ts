@@ -25,9 +25,13 @@ describe("callDownstream", () => {
   it("calls LiteLLM-compatible endpoint when configured", async () => {
     const previousBaseUrl = config.downstreamBaseUrl;
     const previousApiKey = config.downstreamApiKey;
+    const previousAuthMode = config.downstreamAuthMode;
+    const previousExtraHeaders = config.downstreamExtraHeaders;
 
     config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
     config.downstreamApiKey = "test-key";
+    config.downstreamAuthMode = "bearer";
+    config.downstreamExtraHeaders = { "x-mux-test": "1" };
 
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -55,14 +59,94 @@ describe("callDownstream", () => {
 
     const requestInit = fetchSpy.mock.calls[0]?.[1] as RequestInit;
     expect(requestInit.method).toBe("POST");
-    expect((requestInit.headers as Record<string, string>).authorization).toBe(
-      "Bearer test-key",
-    );
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer test-key");
+    expect(headers["x-mux-test"]).toBe("1");
 
     expect(response.model).toBe("gpt-4o-mini");
 
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamApiKey = previousApiKey;
+    config.downstreamAuthMode = previousAuthMode;
+    config.downstreamExtraHeaders = previousExtraHeaders;
+  });
+
+  it("supports x-api-key auth mode for downstream", async () => {
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousApiKey = config.downstreamApiKey;
+    const previousAuthMode = config.downstreamAuthMode;
+
+    config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
+    config.downstreamApiKey = "abc123";
+    config.downstreamAuthMode = "x-api-key";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          created: 123,
+          model: "gpt-4o-mini",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "hello" },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await callDownstream(requestPayload, route);
+
+    const requestInit = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("abc123");
+    expect(headers.authorization).toBeUndefined();
+
+    config.downstreamBaseUrl = previousBaseUrl;
+    config.downstreamApiKey = previousApiKey;
+    config.downstreamAuthMode = previousAuthMode;
+  });
+
+  it("supports passthrough auth mode", async () => {
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousAuthMode = config.downstreamAuthMode;
+
+    config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
+    config.downstreamAuthMode = "passthrough";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          created: 123,
+          model: "gpt-4o-mini",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "hello" },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await callDownstream(requestPayload, route, {
+      incomingAuthorizationHeader: "Bearer passthrough-token",
+    });
+
+    const requestInit = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer passthrough-token");
+
+    config.downstreamBaseUrl = previousBaseUrl;
+    config.downstreamAuthMode = previousAuthMode;
   });
 
   it("throws when not configured and fallback disabled", async () => {
