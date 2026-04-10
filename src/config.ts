@@ -68,6 +68,7 @@ export const config = {
   defaultBackendTarget:
     process.env.DEFAULT_BACKEND_TARGET ?? "mock://downstream-chat-completions",
   modelMap: parseModelMap(process.env.MODEL_MAP),
+  anthropicModelMap: parseModelMap(process.env.ANTHROPIC_MODEL_MAP),
   downstreamMode: parseDownstreamMode(process.env.DOWNSTREAM_MODE),
   downstreamBaseUrl: normalizeBaseUrl(process.env.DOWNSTREAM_BASE_URL),
   downstreamApiKey: process.env.DOWNSTREAM_API_KEY,

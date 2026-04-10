@@ -160,7 +160,8 @@ curl -s http://localhost:8787/v1/chat/completions \
 
 ### Current behavior
 
-- If `MODEL_MAP` includes the requested model, that mapping wins.
+- If the request is for a Claude model (`claude-*`) and `ANTHROPIC_MODEL_MAP` includes it, that Anthropic-specific mapping wins.
+- Else, if `MODEL_MAP` includes the requested model, that mapping wins.
 - Else, `gpt-4o` is downgraded to `gpt-4o-mini` for simple prompts.
 - If prompt appears complex (basic keyword heuristic), model is kept.
 - `DOWNSTREAM_MODE=openai-compatible` (default):
@@ -183,7 +184,8 @@ curl -s http://localhost:8787/v1/chat/completions \
 
 - `PORT` (default `8787`)
 - `NODE_ENV` (default `development`)
-- `MODEL_MAP` (JSON map for explicit model overrides)
+- `MODEL_MAP` (JSON map for generic explicit model overrides)
+- `ANTHROPIC_MODEL_MAP` (JSON map for Anthropic/Claude-only overrides, applied before `MODEL_MAP`)
 - `DEFAULT_PROVIDER` (metadata for logs)
 - `DEFAULT_BACKEND_TARGET` (metadata for logs)
 - `DOWNSTREAM_MODE` (`openai-compatible` default, `anthropic-sdk`)
