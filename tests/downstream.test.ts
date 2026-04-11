@@ -5,8 +5,11 @@ import {
   __resetAnthropicClientForTests,
   callDownstream,
   DownstreamNotConfiguredError,
+  DownstreamRequestError,
   anthropicStopReasonToOpenAI,
   downstreamLogger,
+  streamAnthropicToOpenAI,
+  streamDownstream,
   toAnthropicInput,
   toOpenAIResponse,
   translateToolChoiceToAnthropic,
@@ -1000,5 +1003,430 @@ describe("callDownstream — tools forwarding to Anthropic SDK", () => {
     config.anthropicOauthToken = previousOauthToken;
     config.anthropicApiKey = previousApiKey;
     config.anthropicBaseUrl = previousAnthropicBaseUrl;
+  });
+});
+
+// --- streaming helper + integration -----------------------------------------
+
+type StubResponse = {
+  writes: string[];
+  statusCode: number | null;
+  headers: Record<string, string>;
+  ended: boolean;
+  status: (code: number) => StubResponse;
+  setHeader: (k: string, v: string) => void;
+  getHeader: (k: string) => string | undefined;
+  headersSent: boolean;
+  write: (chunk: string) => boolean;
+  end: () => void;
+  once: (event: string, cb: () => void) => void;
+  off: (event: string, cb: () => void) => void;
+  emit: (event: string) => void;
+  _listeners: Record<string, Array<() => void>>;
+};
+
+const makeStubRes = (): StubResponse => {
+  const res: StubResponse = {
+    writes: [],
+    statusCode: null,
+    headers: {},
+    ended: false,
+    headersSent: false,
+    _listeners: {},
+    status(code: number) {
+      res.statusCode = code;
+      return res;
+    },
+    setHeader(k: string, v: string) {
+      res.headers[k] = v;
+    },
+    getHeader(k: string) {
+      return res.headers[k];
+    },
+    write(chunk: string) {
+      res.headersSent = true;
+      res.writes.push(chunk);
+      return true;
+    },
+    end() {
+      res.ended = true;
+    },
+    once(event: string, cb: () => void) {
+      (res._listeners[event] ||= []).push(cb);
+    },
+    off(event: string, cb: () => void) {
+      const list = res._listeners[event];
+      if (!list) return;
+      const i = list.indexOf(cb);
+      if (i >= 0) list.splice(i, 1);
+    },
+    emit(event: string) {
+      for (const cb of res._listeners[event] ?? []) cb();
+    },
+  };
+  return res;
+};
+
+const parseSseFrames = (writes: string[]): Array<Record<string, unknown> | "[DONE]"> => {
+  const frames: Array<Record<string, unknown> | "[DONE]"> = [];
+  const joined = writes.join("");
+  for (const raw of joined.split("\n\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("data: ")) continue;
+    const body = line.slice(6);
+    if (body === "[DONE]") {
+      frames.push("[DONE]");
+      continue;
+    }
+    frames.push(JSON.parse(body));
+  }
+  return frames;
+};
+
+const eventsAsAsyncIterable = <T>(events: T[]): AsyncIterable<T> => ({
+  [Symbol.asyncIterator]() {
+    let i = 0;
+    return {
+      async next() {
+        if (i >= events.length) return { value: undefined as unknown as T, done: true };
+        return { value: events[i++]!, done: false };
+      },
+    };
+  },
+});
+
+describe("streamAnthropicToOpenAI", () => {
+  it("emits role chunk, text deltas, final finish_reason, and [DONE]", async () => {
+    const res = makeStubRes();
+    const events = [
+      { type: "message_start", message: { id: "msg_1" } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hel" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null } },
+      { type: "message_stop" },
+    ];
+
+    await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const frames = parseSseFrames(res.writes);
+    expect(frames[frames.length - 1]).toBe("[DONE]");
+    const chunks = frames.filter((f): f is Record<string, unknown> => f !== "[DONE]");
+    // 1: role, 2: "hel", 3: "lo", 4: final finish_reason
+    expect(chunks).toHaveLength(4);
+
+    const firstDelta = (chunks[0] as any).choices[0].delta;
+    expect(firstDelta).toEqual({ role: "assistant" });
+    expect((chunks[0] as any).choices[0].finish_reason).toBeNull();
+
+    expect((chunks[1] as any).choices[0].delta).toEqual({ content: "hel" });
+    expect((chunks[2] as any).choices[0].delta).toEqual({ content: "lo" });
+
+    const last = chunks[3] as any;
+    expect(last.choices[0].delta).toEqual({});
+    expect(last.choices[0].finish_reason).toBe("stop");
+    expect(res.ended).toBe(true);
+  });
+
+  it("streams tool_use start + input_json_delta fragments with the same index", async () => {
+    const res = makeStubRes();
+    const events = [
+      { type: "message_start", message: { id: "msg_1" } },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_1", name: "read_file", input: {} },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"path":"/e' },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: 'tc/hosts"}' },
+      },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null } },
+      { type: "message_stop" },
+    ];
+
+    await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const chunks = parseSseFrames(res.writes).filter(
+      (f): f is Record<string, unknown> => f !== "[DONE]",
+    );
+    // Role chunk + tool_use start + 2 argument fragments + final.
+    expect(chunks).toHaveLength(5);
+
+    const toolStart = (chunks[1] as any).choices[0].delta.tool_calls;
+    expect(toolStart).toEqual([
+      {
+        index: 0,
+        id: "toolu_1",
+        type: "function",
+        function: { name: "read_file", arguments: "" },
+      },
+    ]);
+
+    // Subsequent deltas carry PARTIAL fragments at the same tool_calls index.
+    // The client concatenates; we must not do it ourselves.
+    const frag1 = (chunks[2] as any).choices[0].delta.tool_calls;
+    expect(frag1).toEqual([{ index: 0, function: { arguments: '{"path":"/e' } }]);
+    const frag2 = (chunks[3] as any).choices[0].delta.tool_calls;
+    expect(frag2).toEqual([{ index: 0, function: { arguments: 'tc/hosts"}' } }]);
+
+    // Final chunk uses tool_use → tool_calls mapping.
+    expect((chunks[4] as any).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  it("writes a terminal [stream error:] chunk when the event source throws", async () => {
+    const res = makeStubRes();
+    const events: AsyncIterable<any> = {
+      [Symbol.asyncIterator]() {
+        let sent = 0;
+        return {
+          async next() {
+            if (sent === 0) {
+              sent++;
+              return { value: { type: "message_start", message: { id: "x" } }, done: false };
+            }
+            throw new Error("transport died");
+          },
+        };
+      },
+    };
+
+    await streamAnthropicToOpenAI(
+      events,
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const joined = res.writes.join("");
+    expect(joined).toContain("[stream error: transport died]");
+    expect(joined.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(res.ended).toBe(true);
+  });
+});
+
+describe("streamDownstream", () => {
+  const setupAnthropic = () => {
+    const previousMode = config.downstreamMode;
+    const previousOauthToken = config.anthropicOauthToken;
+    const previousApiKey = config.anthropicApiKey;
+    const previousAnthropicBaseUrl = config.anthropicBaseUrl;
+
+    config.downstreamMode = "anthropic-sdk";
+    config.anthropicOauthToken = "sk-ant-oat01-test";
+    config.anthropicApiKey = undefined;
+    config.anthropicBaseUrl = "http://127.0.0.1:30400";
+
+    return () => {
+      config.downstreamMode = previousMode;
+      config.anthropicOauthToken = previousOauthToken;
+      config.anthropicApiKey = previousApiKey;
+      config.anthropicBaseUrl = previousAnthropicBaseUrl;
+    };
+  };
+
+  const sseResponse = (frames: string[]): Response => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const f of frames) controller.enqueue(encoder.encode(f));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  const anthropicSseFrame = (eventName: string, data: unknown): string =>
+    `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  it("produces OpenAI chunks and a terminal [DONE] for a text stream", async () => {
+    const restore = setupAnthropic();
+    try {
+      const frames = [
+        anthropicSseFrame("message_start", {
+          type: "message_start",
+          message: {
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-6",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        }),
+        anthropicSseFrame("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
+        anthropicSseFrame("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "hi" },
+        }),
+        anthropicSseFrame("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: " there" },
+        }),
+        anthropicSseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+        anthropicSseFrame("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 5 },
+        }),
+        anthropicSseFrame("message_stop", { type: "message_stop" }),
+      ];
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse(frames));
+
+      const res = makeStubRes();
+      await streamDownstream(
+        {
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        { ...route, requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+        res as unknown as import("express").Response,
+      );
+
+      expect(res.headers["Content-Type"]).toContain("text/event-stream");
+      const parsed = parseSseFrames(res.writes);
+      expect(parsed[parsed.length - 1]).toBe("[DONE]");
+      const chunks = parsed.filter((f): f is Record<string, unknown> => f !== "[DONE]");
+      const content = chunks
+        .map((c: any) => c.choices?.[0]?.delta?.content)
+        .filter(Boolean)
+        .join("");
+      expect(content).toBe("hi there");
+      const final = chunks[chunks.length - 1] as any;
+      // Anthropic end_turn → OpenAI stop (via anthropicStopReasonToOpenAI).
+      expect(final.choices[0].finish_reason).toBe("stop");
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects with DownstreamRequestError when the stream start fails", async () => {
+    const restore = setupAnthropic();
+    try {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            type: "error",
+            error: { type: "invalid_request_error", message: "bad prompt" },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const res = makeStubRes();
+      await expect(
+        streamDownstream(
+          {
+            model: "claude-sonnet-4-6",
+            messages: [{ role: "user", content: "hi" }],
+            stream: true,
+          },
+          { ...route, requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+          res as unknown as import("express").Response,
+        ),
+      ).rejects.toBeInstanceOf(DownstreamRequestError);
+
+      // No bytes may be written when the start fails — app.ts's 502 branch
+      // takes over and sends a JSON error.
+      expect(res.writes).toHaveLength(0);
+      expect(res.ended).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("fires mux.anthropic_request with streamed:true and mux.anthropic_response on success", async () => {
+    const restore = setupAnthropic();
+    try {
+      const frames = [
+        anthropicSseFrame("message_start", {
+          type: "message_start",
+          message: {
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-6",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        }),
+        anthropicSseFrame("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
+        anthropicSseFrame("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "ok" },
+        }),
+        anthropicSseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+        anthropicSseFrame("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        }),
+        anthropicSseFrame("message_stop", { type: "message_stop" }),
+      ];
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse(frames));
+
+      const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+      const res = makeStubRes();
+      await streamDownstream(
+        {
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        { ...route, requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+        res as unknown as import("express").Response,
+      );
+
+      const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+      const reqEvent = calls.find((c) => c.event === "mux.anthropic_request");
+      expect(reqEvent).toBeDefined();
+      expect(reqEvent?.streamed).toBe(true);
+
+      const respEvent = calls.find((c) => c.event === "mux.anthropic_response");
+      expect(respEvent).toBeDefined();
+      expect(respEvent?.streamed).toBe(true);
+      expect(respEvent?.stopReason).toBe("end_turn");
+      expect(respEvent?.joinedTextLength).toBe(2);
+    } finally {
+      restore();
+    }
   });
 });
