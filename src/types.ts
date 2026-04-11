@@ -1,6 +1,9 @@
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  // Upstream clients (OpenAI-style, pi-ai, etc.) send either a plain string
+  // or an array of content parts (text, image_url, native Anthropic blocks).
+  // We normalize downstream.
+  content: unknown;
 };
 
 export type ChatCompletionsRequest = {
