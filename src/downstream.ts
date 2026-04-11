@@ -362,6 +362,33 @@ export const toAnthropicInput = (req: ChatCompletionsRequest): {
   return { system: system || undefined, messages };
 };
 
+/**
+ * Translate an Anthropic `stop_reason` into an OpenAI `finish_reason`.
+ *
+ * OpenAI clients (including pi-ai's openai-completions adapter) only know the
+ * OpenAI vocabulary: `stop | length | tool_calls | content_filter | function_call`.
+ * If Mux passes Anthropic values through verbatim (`end_turn`, `max_tokens`, …),
+ * pi-ai's mapStopReason throws `Unhandled stop reason: end_turn` AFTER the
+ * text has already streamed. The assistant message is then persisted by the
+ * agent with stopReason="error" and transform-messages.js drops it on every
+ * subsequent turn — producing the +1/turn context bleed tracked in
+ * arniesaha/agent-max#24.
+ */
+export const anthropicStopReasonToOpenAI = (
+  reason: string | null | undefined,
+): "stop" | "length" | "tool_calls" => {
+  switch (reason) {
+    case "tool_use":
+      return "tool_calls";
+    case "max_tokens":
+    case "model_context_window_exceeded":
+      return "length";
+    default:
+      // end_turn / stop_sequence / refusal / pause_turn / null / unknown → "stop"
+      return "stop";
+  }
+};
+
 export const toOpenAIResponse = (response: Message, model: string): DownstreamResponse => {
   const textBlocks = response.content.filter((block) => block.type === "text") as Array<{
     type: "text";
@@ -393,7 +420,7 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
           role: "assistant",
           content,
         },
-        finish_reason: response.stop_reason ?? "stop",
+        finish_reason: anthropicStopReasonToOpenAI(response.stop_reason),
       },
     ],
     usage: {
