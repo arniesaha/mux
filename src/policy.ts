@@ -80,7 +80,7 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
       if (containsMaxDeepReasoningCue(transcript)) {
         return {
           requestedModel,
-          resolvedModel: "claude-opus-4-1",
+          resolvedModel: "claude-opus-4-6",
           routeReason: "heuristic:max_anthropic_deep_reasoning",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
@@ -90,7 +90,7 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
       if (containsMaxCodingCue(transcript)) {
         return {
           requestedModel,
-          resolvedModel: "claude-3-7-sonnet-latest",
+          resolvedModel: "claude-sonnet-4-6",
           routeReason: "heuristic:max_anthropic_coding",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
