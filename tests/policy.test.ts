@@ -81,4 +81,82 @@ describe("resolveRoute", () => {
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
   });
+
+  it("routes Max lightweight Claude prompts to Haiku", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-3-7-sonnet-latest",
+      runtime: "max",
+      messages: [{ role: "user", content: "give me a quick summary" }],
+    });
+
+    expect(route.resolvedModel).toBe("claude-3-5-haiku-latest");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_lightweight");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("routes Max coding/debug Claude prompts to Sonnet", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-3-5-haiku-latest",
+      runtime: "max",
+      messages: [{ role: "user", content: "debug this TypeScript stack trace" }],
+    });
+
+    expect(route.resolvedModel).toBe("claude-3-7-sonnet-latest");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_coding");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("routes Max deep-reasoning Claude prompts to Opus", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-3-7-sonnet-latest",
+      runtime: "max",
+      messages: [{ role: "user", content: "analyze architecture tradeoffs and make a long-term roadmap" }],
+    });
+
+    expect(route.resolvedModel).toBe("claude-opus-4-1");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_deep_reasoning");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("keeps Anthropic model-map override ahead of Max heuristics", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {
+      "claude-3-7-sonnet-latest": "claude-sonnet-4-5",
+    };
+
+    const route = resolveRoute({
+      model: "claude-3-7-sonnet-latest",
+      runtime: "max",
+      messages: [{ role: "user", content: "analyze architecture tradeoffs" }],
+    });
+
+    expect(route.resolvedModel).toBe("claude-sonnet-4-5");
+    expect(route.routeReason).toBe("config:anthropic_model_map_override");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
 });

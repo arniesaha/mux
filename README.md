@@ -161,6 +161,10 @@ curl -s http://localhost:8787/v1/chat/completions \
 ### Current behavior
 
 - If the request is for a Claude model (`claude-*`) and `ANTHROPIC_MODEL_MAP` includes it, that Anthropic-specific mapping wins.
+- Else, for Max runtime Claude requests (`runtime: max` or `x-runtime: max`), Mux applies a first-pass Anthropic policy:
+  - lightweight/general chat → `claude-3-5-haiku-latest`
+  - coding/debug/troubleshooting → `claude-3-7-sonnet-latest`
+  - deeper planning/complex reasoning → `claude-opus-4-1`
 - Else, if `MODEL_MAP` includes the requested model, that mapping wins.
 - Else, `gpt-4o` is downgraded to `gpt-4o-mini` for simple prompts.
 - If prompt appears complex (basic keyword heuristic), model is kept.
