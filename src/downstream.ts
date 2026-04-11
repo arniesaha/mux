@@ -1,5 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Message } from "@anthropic-ai/sdk/resources/messages/messages";
+import type {
+  Message,
+  RawMessageStreamEvent,
+} from "@anthropic-ai/sdk/resources/messages/messages";
+import type express from "express";
 import pino from "pino";
 
 import { config } from "./config.js";
@@ -618,10 +622,16 @@ const summarizeMessagesForLog = (messages: AnthropicInputMessage[]) =>
     return { index, role: m.role, textLength, imageCount, blockCount: m.content.length };
   });
 
-const callAnthropicSdk = async (
+type PreparedAnthropicCall = {
+  client: Anthropic;
+  params: Record<string, unknown>;
+};
+
+const prepareAnthropicCall = (
   req: ChatCompletionsRequest,
   route: RouteDecision,
-): Promise<DownstreamResponse> => {
+  streamed: boolean,
+): PreparedAnthropicCall => {
   const client = getAnthropicClient();
   const { system, messages } = toAnthropicInput(req);
   const isOauth = Boolean(config.anthropicOauthToken?.trim());
@@ -652,18 +662,56 @@ const callAnthropicSdk = async (
     messages: summarizeMessagesForLog(messages),
     toolsCount: anthropicTools?.length ?? 0,
     toolChoice: anthropicToolChoice ?? null,
+    streamed,
   });
+
+  const params: Record<string, unknown> = {
+    model: route.resolvedModel,
+    max_tokens: maxTokens,
+    temperature: req.temperature,
+    system: systemBlocks,
+    messages,
+  };
+  if (anthropicTools) params.tools = anthropicTools;
+  if (anthropicToolChoice) params.tool_choice = anthropicToolChoice;
+
+  return { client, params };
+};
+
+const handleAnthropicSdkError = (
+  error: unknown,
+  route: RouteDecision,
+): DownstreamRequestError | Error => {
+  if (error instanceof Anthropic.APIError) {
+    downstreamLogger.error({
+      event: "mux.anthropic_api_error",
+      resolvedModel: route.resolvedModel,
+      status: error.status ?? null,
+      name: error.name,
+      message: error.message,
+      body: error.error ?? null,
+    });
+    return new DownstreamRequestError(error.status ?? 500, error.error ?? error.message);
+  }
+
+  downstreamLogger.error({
+    event: "mux.anthropic_unknown_error",
+    resolvedModel: route.resolvedModel,
+    err: error instanceof Error ? { name: error.name, message: error.message } : String(error),
+  });
+  return error instanceof Error ? error : new Error(String(error));
+};
+
+const callAnthropicSdk = async (
+  req: ChatCompletionsRequest,
+  route: RouteDecision,
+): Promise<DownstreamResponse> => {
+  const { client, params } = prepareAnthropicCall(req, route, false);
 
   try {
     const response = await client.messages.create({
-      model: route.resolvedModel,
-      max_tokens: maxTokens,
-      temperature: req.temperature,
-      system: systemBlocks as any,
-      messages: messages as any,
+      ...(params as any),
       stream: false,
-      ...(anthropicTools ? { tools: anthropicTools as any } : {}),
-      ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice as any } : {}),
     });
 
     const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
@@ -705,24 +753,7 @@ const callAnthropicSdk = async (
 
     return toOpenAIResponse(response, route.resolvedModel);
   } catch (error) {
-    if (error instanceof Anthropic.APIError) {
-      downstreamLogger.error({
-        event: "mux.anthropic_api_error",
-        resolvedModel: route.resolvedModel,
-        status: error.status ?? null,
-        name: error.name,
-        message: error.message,
-        body: error.error ?? null,
-      });
-      throw new DownstreamRequestError(error.status ?? 500, error.error ?? error.message);
-    }
-
-    downstreamLogger.error({
-      event: "mux.anthropic_unknown_error",
-      resolvedModel: route.resolvedModel,
-      err: error instanceof Error ? { name: error.name, message: error.message } : String(error),
-    });
-    throw error;
+    throw handleAnthropicSdkError(error, route);
   }
 };
 
@@ -746,4 +777,262 @@ export const callDownstream = async (
   }
 
   return callOpenAICompatible(req, route, context);
+};
+
+// --- Streaming path ------------------------------------------------------
+
+export type StreamLogCtx = {
+  requestedModel: string;
+  resolvedModel: string;
+};
+
+type ToolCallAccum = {
+  index: number;
+  id: string;
+  name: string;
+  argsLength: number;
+};
+
+// Consume an async-iterable of Anthropic RawMessageStreamEvents and write
+// OpenAI-shaped chat.completion.chunk SSE frames to `res`. Returns once the
+// stream is fully drained (or a terminal error chunk has been written). The
+// caller is responsible for setting SSE headers BEFORE invoking this.
+export const streamAnthropicToOpenAI = async (
+  events: AsyncIterable<RawMessageStreamEvent>,
+  res: express.Response,
+  model: string,
+  logCtx: StreamLogCtx,
+  onAbort?: () => void,
+): Promise<void> => {
+  const streamId = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+
+  const writeChunk = (delta: Record<string, unknown>, finishReason: string | null) => {
+    const payload = {
+      id: streamId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta,
+          finish_reason: finishReason,
+        },
+      ],
+    };
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    const anyRes = res as unknown as { flush?: () => void };
+    if (typeof anyRes.flush === "function") anyRes.flush();
+  };
+
+  // block_index (Anthropic) → accumulator. We map each Anthropic content-block
+  // index to a dense OpenAI tool_calls index so clients see 0,1,2... even if
+  // Anthropic emits blocks at e.g. index 1 (text at 0, tool_use at 1).
+  const toolCalls = new Map<number, ToolCallAccum>();
+  let nextToolIndex = 0;
+  let textLength = 0;
+  let finalStopReason: string | null = null;
+  let phase: string = "start";
+  let aborted = false;
+  let clientClosed = false;
+
+  const onClose = () => {
+    clientClosed = true;
+    if (!aborted) {
+      aborted = true;
+      try {
+        onAbort?.();
+      } catch {
+        // swallow — best-effort abort
+      }
+      downstreamLogger.info({
+        event: "mux.anthropic_stream_client_closed",
+        resolvedModel: logCtx.resolvedModel,
+        phase,
+      });
+    }
+  };
+  res.once("close", onClose);
+
+  writeChunk({ role: "assistant" }, null);
+
+  try {
+    for await (const event of events) {
+      if (clientClosed) break;
+      phase = event.type;
+      switch (event.type) {
+        case "message_start":
+          // role chunk already emitted; nothing else to do
+          break;
+        case "content_block_start": {
+          const block = (event as { content_block: { type: string; id?: string; name?: string } }).content_block;
+          if (block.type === "tool_use") {
+            const idx = nextToolIndex++;
+            toolCalls.set(event.index, {
+              index: idx,
+              id: block.id ?? "",
+              name: block.name ?? "",
+              argsLength: 0,
+            });
+            writeChunk(
+              {
+                tool_calls: [
+                  {
+                    index: idx,
+                    id: block.id ?? "",
+                    type: "function",
+                    function: { name: block.name ?? "", arguments: "" },
+                  },
+                ],
+              },
+              null,
+            );
+          }
+          break;
+        }
+        case "content_block_delta": {
+          const delta = (event as { delta: { type: string; text?: string; partial_json?: string } }).delta;
+          if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
+            textLength += delta.text.length;
+            writeChunk({ content: delta.text }, null);
+          } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            const accum = toolCalls.get(event.index);
+            if (accum) {
+              accum.argsLength += delta.partial_json.length;
+              writeChunk(
+                {
+                  tool_calls: [
+                    {
+                      index: accum.index,
+                      function: { arguments: delta.partial_json },
+                    },
+                  ],
+                },
+                null,
+              );
+            }
+          }
+          break;
+        }
+        case "content_block_stop":
+          // accumulator closes implicitly
+          break;
+        case "message_delta": {
+          const d = (event as { delta: { stop_reason?: string | null } }).delta;
+          if (d && typeof d.stop_reason === "string") {
+            finalStopReason = d.stop_reason;
+          }
+          break;
+        }
+        case "message_stop":
+          // terminal — fall through to end-of-stream logic below
+          break;
+        default:
+          break;
+      }
+    }
+
+    const toolUseBlockCount = toolCalls.size;
+    const empty = toolUseBlockCount === 0 && textLength === 0;
+    const respEvent = {
+      event: "mux.anthropic_response",
+      resolvedModel: logCtx.resolvedModel,
+      stopReason: finalStopReason,
+      stopSequence: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      blockCount: (textLength > 0 ? 1 : 0) + toolUseBlockCount,
+      blockTypes: [
+        ...(textLength > 0 ? ["text"] : []),
+        ...Array.from({ length: toolUseBlockCount }, () => "tool_use"),
+      ],
+      textBlockCount: textLength > 0 ? 1 : 0,
+      toolUseBlockCount,
+      toolNames: Array.from(toolCalls.values()).map((t) => t.name),
+      joinedTextLength: textLength,
+      empty,
+      streamed: true,
+    };
+    if (empty) {
+      downstreamLogger.warn(respEvent);
+    } else {
+      downstreamLogger.info(respEvent);
+    }
+
+    if (!clientClosed) {
+      writeChunk({}, anthropicStopReasonToOpenAI(finalStopReason));
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
+  } catch (err) {
+    downstreamLogger.error({
+      event: "mux.anthropic_stream_error",
+      resolvedModel: logCtx.resolvedModel,
+      phase,
+      err: err instanceof Error ? { name: err.name, message: err.message } : String(err),
+    });
+    if (!clientClosed) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeChunk({ content: `[stream error: ${msg}]` }, null);
+      writeChunk({}, anthropicStopReasonToOpenAI(finalStopReason));
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
+  } finally {
+    res.off("close", onClose);
+  }
+};
+
+export const streamDownstream = async (
+  req: ChatCompletionsRequest,
+  route: RouteDecision,
+  res: express.Response,
+): Promise<void> => {
+  if (config.downstreamMode !== "anthropic-sdk") {
+    throw new Error("streamDownstream is only supported in anthropic-sdk mode");
+  }
+
+  const { client, params } = prepareAnthropicCall(req, route, true);
+
+  // Stream-start errors (auth, 4xx) surface here BEFORE any bytes hit the
+  // wire. Convert to DownstreamRequestError so app.ts's existing 502 branch
+  // sends a JSON error response.
+  let stream: Awaited<ReturnType<typeof client.messages.create>>;
+  try {
+    stream = (await client.messages.create({
+      ...(params as any),
+      stream: true,
+    })) as any;
+  } catch (error) {
+    throw handleAnthropicSdkError(error, route);
+  }
+
+  // Once the stream object exists, the SDK has received HTTP headers — from
+  // here on, we own the response body and MUST NOT throw past app.ts.
+  if (!res.headersSent) {
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+  }
+
+  const abortable = stream as unknown as {
+    controller?: AbortController;
+    [Symbol.asyncIterator]: () => AsyncIterator<RawMessageStreamEvent>;
+  };
+
+  await streamAnthropicToOpenAI(
+    abortable as AsyncIterable<RawMessageStreamEvent>,
+    res,
+    route.resolvedModel,
+    { requestedModel: route.requestedModel, resolvedModel: route.resolvedModel },
+    () => {
+      try {
+        abortable.controller?.abort();
+      } catch {
+        // best effort
+      }
+    },
+  );
 };

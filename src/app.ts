@@ -6,6 +6,7 @@ import {
   callDownstream,
   DownstreamNotConfiguredError,
   DownstreamRequestError,
+  streamDownstream,
   type DownstreamRequestContext,
 } from "./downstream.js";
 import { resolveRoute } from "./policy.js";
@@ -154,6 +155,11 @@ export const createApp = () => {
       const downstreamContext: DownstreamRequestContext = {
         incomingAuthorizationHeader: req.header("authorization") ?? undefined,
       };
+
+      if (routedBody.stream && config.downstreamMode === "anthropic-sdk") {
+        await streamDownstream(routedBody, route, res);
+        return;
+      }
 
       const downstream = await callDownstream(routedBody, route, downstreamContext);
 
