@@ -9,8 +9,10 @@ import {
   downstreamLogger,
   toAnthropicInput,
   toOpenAIResponse,
+  translateToolChoiceToAnthropic,
+  translateToolsToAnthropic,
 } from "../src/downstream.js";
-import type { ChatCompletionsRequest, RouteDecision } from "../src/types.js";
+import type { ChatCompletionsRequest, OpenAIToolDef, RouteDecision } from "../src/types.js";
 
 const requestPayload: ChatCompletionsRequest = {
   model: "gpt-4o",
@@ -661,5 +663,342 @@ describe("anthropicStopReasonToOpenAI", () => {
     // Unknown values fall back to "stop" instead of throwing, so an
     // unrecognized Anthropic value never poisons downstream agents.
     expect(anthropicStopReasonToOpenAI("totally_made_up" as any)).toBe("stop");
+  });
+});
+
+describe("translateToolsToAnthropic", () => {
+  it("converts OpenAI function tool definitions into Anthropic tool shape", () => {
+    const tools: OpenAIToolDef[] = [
+      {
+        type: "function",
+        function: {
+          name: "gpu_status",
+          description: "Report GPU state",
+          parameters: {
+            type: "object",
+            properties: { verbose: { type: "boolean" } },
+            required: [],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "read_file",
+          parameters: { type: "object", properties: { path: { type: "string" } } },
+        },
+      },
+    ];
+    const result = translateToolsToAnthropic(tools);
+    expect(result).toHaveLength(2);
+    expect(result![0]).toEqual({
+      name: "gpu_status",
+      description: "Report GPU state",
+      input_schema: {
+        type: "object",
+        properties: { verbose: { type: "boolean" } },
+        required: [],
+      },
+    });
+    expect(result![1]).toEqual({
+      name: "read_file",
+      input_schema: { type: "object", properties: { path: { type: "string" } } },
+    });
+  });
+
+  it("returns undefined for empty or missing tools", () => {
+    expect(translateToolsToAnthropic(undefined)).toBeUndefined();
+    expect(translateToolsToAnthropic([])).toBeUndefined();
+  });
+
+  it("supplies a default input_schema when parameters are missing", () => {
+    const result = translateToolsToAnthropic([
+      { type: "function", function: { name: "noop" } },
+    ]);
+    expect(result![0]!.input_schema).toEqual({ type: "object", properties: {} });
+  });
+});
+
+describe("translateToolChoiceToAnthropic", () => {
+  it("maps each OpenAI tool_choice variant to the Anthropic shape", () => {
+    expect(translateToolChoiceToAnthropic("auto")).toEqual({ type: "auto" });
+    expect(translateToolChoiceToAnthropic("none")).toEqual({ type: "none" });
+    expect(translateToolChoiceToAnthropic("required")).toEqual({ type: "any" });
+    expect(
+      translateToolChoiceToAnthropic({ type: "function", function: { name: "read_file" } }),
+    ).toEqual({ type: "tool", name: "read_file" });
+    expect(translateToolChoiceToAnthropic(undefined)).toBeUndefined();
+  });
+});
+
+describe("toAnthropicInput — tool round-trip", () => {
+  it("converts an assistant message with OpenAI tool_calls into Anthropic tool_use blocks", () => {
+    const { messages } = toAnthropicInput({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "check gpu" },
+        {
+          role: "assistant",
+          content: "Let me check.",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "gpu_status", arguments: '{"verbose":true}' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(2);
+    const assistant = messages[1]!;
+    expect(assistant.role).toBe("assistant");
+    expect(assistant.content).toHaveLength(2);
+    expect(assistant.content[0]).toEqual({ type: "text", text: "Let me check." });
+    expect(assistant.content[1]).toEqual({
+      type: "tool_use",
+      id: "call_1",
+      name: "gpu_status",
+      input: { verbose: true },
+    });
+  });
+
+  it("handles unparseable tool_call arguments by wrapping them in {_raw}", () => {
+    const { messages } = toAnthropicInput({
+      model: "claude-sonnet-4-6",
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_bad",
+              type: "function",
+              function: { name: "noop", arguments: "not-json" },
+            },
+          ],
+        },
+      ],
+    });
+    const toolUse = messages[0]!.content[0] as { type: "tool_use"; input: unknown };
+    expect(toolUse.type).toBe("tool_use");
+    expect(toolUse.input).toEqual({ _raw: "not-json" });
+  });
+
+  it("converts a role:'tool' message into an Anthropic tool_result block", () => {
+    const { messages } = toAnthropicInput({
+      model: "claude-sonnet-4-6",
+      messages: [
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "GPU is idle",
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(1);
+    const userMsg = messages[0]!;
+    expect(userMsg.role).toBe("user");
+    expect(userMsg.content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "call_1",
+        content: "GPU is idle",
+      },
+    ]);
+  });
+
+  it("falls back to plain user text when a tool message has no tool_call_id", () => {
+    const { messages } = toAnthropicInput({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "tool", content: "orphaned tool output" }],
+    });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.role).toBe("user");
+    expect(messages[0]!.content).toEqual([{ type: "text", text: "orphaned tool output" }]);
+  });
+});
+
+describe("toOpenAIResponse — tool_calls surfacing", () => {
+  const baseUsage = { input_tokens: 1, output_tokens: 1 };
+
+  it("exposes Anthropic tool_use blocks as OpenAI tool_calls on the message", () => {
+    const response = toOpenAIResponse(
+      {
+        id: "msg_tool",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [
+          { type: "text", text: "Checking now." },
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "gpu_status",
+            input: { verbose: true },
+          },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: baseUsage,
+      } as unknown as Parameters<typeof toOpenAIResponse>[0],
+      "claude-sonnet-4-6",
+    );
+
+    const msg = response.choices[0]!.message;
+    expect(msg.content).toBe("Checking now.");
+    expect(msg.tool_calls).toEqual([
+      {
+        id: "toolu_1",
+        type: "function",
+        function: { name: "gpu_status", arguments: '{"verbose":true}' },
+      },
+    ]);
+    expect(response.choices[0]!.finish_reason).toBe("tool_calls");
+  });
+
+  it("sets content to null when the only output is a tool_use block", () => {
+    const response = toOpenAIResponse(
+      {
+        id: "msg_tool_only",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [
+          { type: "tool_use", id: "toolu_2", name: "read_file", input: { path: "/etc/hosts" } },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: baseUsage,
+      } as unknown as Parameters<typeof toOpenAIResponse>[0],
+      "claude-sonnet-4-6",
+    );
+
+    const msg = response.choices[0]!.message;
+    expect(msg.content).toBeNull();
+    expect(msg.tool_calls).toHaveLength(1);
+    expect(msg.tool_calls![0]!.function.arguments).toBe('{"path":"/etc/hosts"}');
+    // Must NOT fall through to the synthetic empty-response marker — content
+    // is null (canonical OpenAI shape), not a placeholder string.
+    expect(typeof msg.content === "string" && /empty response/.test(msg.content)).toBe(false);
+  });
+});
+
+describe("callDownstream — tools forwarding to Anthropic SDK", () => {
+  it("forwards req.tools and req.tool_choice to the Anthropic API", async () => {
+    const previousMode = config.downstreamMode;
+    const previousOauthToken = config.anthropicOauthToken;
+    const previousApiKey = config.anthropicApiKey;
+    const previousAnthropicBaseUrl = config.anthropicBaseUrl;
+
+    config.downstreamMode = "anthropic-sdk";
+    config.anthropicOauthToken = "sk-ant-oat01-test";
+    config.anthropicApiKey = undefined;
+    config.anthropicBaseUrl = "http://127.0.0.1:30400";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "msg_tool",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [
+            { type: "tool_use", id: "toolu_x", name: "gpu_status", input: {} },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const response = await callDownstream(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "check the gpu" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "gpu_status",
+              description: "Report GPU state",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+        tool_choice: "auto",
+      },
+      { ...route, requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const body = JSON.parse(String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.tools).toEqual([
+      {
+        name: "gpu_status",
+        description: "Report GPU state",
+        input_schema: { type: "object", properties: {} },
+      },
+    ]);
+    expect(body.tool_choice).toEqual({ type: "auto" });
+
+    // Response round-trips the tool_use block as OpenAI tool_calls.
+    const msg = response.choices[0]!.message;
+    expect(msg.tool_calls).toHaveLength(1);
+    expect(msg.tool_calls![0]!.function.name).toBe("gpu_status");
+    expect(response.choices[0]!.finish_reason).toBe("tool_calls");
+
+    config.downstreamMode = previousMode;
+    config.anthropicOauthToken = previousOauthToken;
+    config.anthropicApiKey = previousApiKey;
+    config.anthropicBaseUrl = previousAnthropicBaseUrl;
+  });
+
+  it("omits tools from the Anthropic request body when req.tools is absent", async () => {
+    const previousMode = config.downstreamMode;
+    const previousOauthToken = config.anthropicOauthToken;
+    const previousApiKey = config.anthropicApiKey;
+    const previousAnthropicBaseUrl = config.anthropicBaseUrl;
+
+    config.downstreamMode = "anthropic-sdk";
+    config.anthropicOauthToken = "sk-ant-oat01-test";
+    config.anthropicApiKey = undefined;
+    config.anthropicBaseUrl = "http://127.0.0.1:30400";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await callDownstream(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      { ...route, requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const body = JSON.parse(String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.tools).toBeUndefined();
+    expect(body.tool_choice).toBeUndefined();
+
+    config.downstreamMode = previousMode;
+    config.anthropicOauthToken = previousOauthToken;
+    config.anthropicApiKey = previousApiKey;
+    config.anthropicBaseUrl = previousAnthropicBaseUrl;
   });
 });

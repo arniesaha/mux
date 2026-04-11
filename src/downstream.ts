@@ -3,7 +3,13 @@ import type { Message } from "@anthropic-ai/sdk/resources/messages/messages";
 import pino from "pino";
 
 import { config } from "./config.js";
-import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
+import type {
+  ChatCompletionsRequest,
+  OpenAIToolCall,
+  OpenAIToolChoice,
+  OpenAIToolDef,
+  RouteDecision,
+} from "./types.js";
 
 export const downstreamLogger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
@@ -21,7 +27,11 @@ export type DownstreamResponse = {
     index: number;
     message: {
       role: "assistant";
-      content: string;
+      // OpenAI spec: content is null when tool_calls is present. Many
+      // clients accept both null and "" — we emit null when we have tool
+      // calls to match the canonical OpenAI shape.
+      content: string | null;
+      tool_calls?: OpenAIToolCall[];
     };
     finish_reason: string;
   }>;
@@ -194,7 +204,23 @@ type AnthropicImageBlock = {
     | { type: "base64"; media_type: string; data: string }
     | { type: "url"; url: string };
 };
-type AnthropicContentBlock = AnthropicTextBlock | AnthropicImageBlock;
+type AnthropicToolUseBlock = {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+};
+type AnthropicToolResultBlock = {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string | AnthropicTextBlock[];
+  is_error?: boolean;
+};
+type AnthropicContentBlock =
+  | AnthropicTextBlock
+  | AnthropicImageBlock
+  | AnthropicToolUseBlock
+  | AnthropicToolResultBlock;
 
 const DATA_URL_RE = /^data:([^;,]+);base64,(.*)$/;
 
@@ -236,6 +262,30 @@ const partToBlock = (part: unknown): AnthropicContentBlock | null => {
   // Native Anthropic image block passthrough.
   if (p.type === "image" && p.source && typeof p.source === "object") {
     return { type: "image", source: p.source as AnthropicImageBlock["source"] };
+  }
+
+  // Native Anthropic tool_use block passthrough (assistant history).
+  if (p.type === "tool_use" && typeof p.id === "string" && typeof p.name === "string") {
+    return { type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} };
+  }
+
+  // Native Anthropic tool_result block passthrough (tool-role history).
+  if (p.type === "tool_result" && typeof p.tool_use_id === "string") {
+    const content =
+      typeof p.content === "string"
+        ? p.content
+        : Array.isArray(p.content)
+          ? p.content
+              .map((c) => partToBlock(c))
+              .filter((b): b is AnthropicTextBlock => b?.type === "text")
+          : stringifyUnknown(p.content);
+    const block: AnthropicToolResultBlock = {
+      type: "tool_result",
+      tool_use_id: p.tool_use_id,
+      content: content as string | AnthropicTextBlock[],
+    };
+    if (p.is_error === true) block.is_error = true;
+    return block;
   }
 
   // Text-like parts.
@@ -328,6 +378,29 @@ export type AnthropicInputMessage = {
   content: AnthropicContentBlock[];
 };
 
+// Convert an OpenAI-style tool_call (as seen on prior assistant turns in
+// ChatMessage.tool_calls) into an Anthropic tool_use block. The OpenAI spec
+// has `arguments` as a JSON-encoded string; we parse it back into an object
+// for Anthropic. Unparseable arguments fall back to {_raw: "..."} so the model
+// still sees what was attempted.
+const openAIToolCallToToolUse = (call: OpenAIToolCall): AnthropicToolUseBlock => {
+  let input: unknown = {};
+  const raw = call.function?.arguments;
+  if (typeof raw === "string" && raw.length > 0) {
+    try {
+      input = JSON.parse(raw);
+    } catch {
+      input = { _raw: raw };
+    }
+  }
+  return {
+    type: "tool_use",
+    id: call.id,
+    name: call.function?.name ?? "unknown",
+    input,
+  };
+};
+
 export const toAnthropicInput = (req: ChatCompletionsRequest): {
   system?: string;
   messages: AnthropicInputMessage[];
@@ -341,17 +414,44 @@ export const toAnthropicInput = (req: ChatCompletionsRequest): {
   const messages: AnthropicInputMessage[] = [];
   for (const m of req.messages) {
     if (m.role === "system") continue;
+
+    // role:"tool" → Anthropic user message with a single tool_result block.
+    // tool_call_id is the link back to the assistant's earlier tool_use.id.
+    if (m.role === "tool") {
+      const toolUseId = m.tool_call_id;
+      if (!toolUseId) {
+        // No correlation id — fall back to a plain text user message so the
+        // content isn't lost.
+        const blocks = normalizeContentToBlocks(m.content);
+        if (blocks.length > 0) messages.push({ role: "user", content: blocks });
+        continue;
+      }
+      const resultContent =
+        typeof m.content === "string"
+          ? m.content
+          : stringifyUnknown(normalizeContentToText(m.content) || m.content);
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseId,
+            content: resultContent,
+          },
+        ],
+      });
+      continue;
+    }
+
     const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
     const blocks = normalizeContentToBlocks(m.content);
 
-    // For tool results, prefix the first text block with a [tool] marker so the
-    // downstream model still sees that the content came from a tool.
-    if (m.role === "tool") {
-      const firstText = blocks.find((b) => b.type === "text") as AnthropicTextBlock | undefined;
-      if (firstText) {
-        firstText.text = `[tool]\n${firstText.text}`;
-      } else {
-        blocks.unshift({ type: "text", text: "[tool]" });
+    // Assistant turns may carry OpenAI-style tool_calls (from prior turns that
+    // the agent replayed). Convert each to an Anthropic tool_use block and
+    // append after the text blocks.
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      for (const call of m.tool_calls) {
+        blocks.push(openAIToolCallToToolUse(call));
       }
     }
 
@@ -360,6 +460,56 @@ export const toAnthropicInput = (req: ChatCompletionsRequest): {
   }
 
   return { system: system || undefined, messages };
+};
+
+export const translateToolsToAnthropic = (
+  tools: OpenAIToolDef[] | undefined,
+): Array<{ name: string; description?: string; input_schema: Record<string, unknown> }> | undefined => {
+  if (!Array.isArray(tools) || tools.length === 0) return undefined;
+  const translated = tools
+    .filter(
+      (t): t is OpenAIToolDef =>
+        !!t && t.type === "function" && !!t.function && typeof t.function.name === "string",
+    )
+    .map((t) => {
+      const params = t.function.parameters;
+      const input_schema: Record<string, unknown> =
+        params && typeof params === "object" && !Array.isArray(params)
+          ? (params as Record<string, unknown>)
+          : { type: "object", properties: {} };
+      const out: { name: string; description?: string; input_schema: Record<string, unknown> } = {
+        name: t.function.name,
+        input_schema,
+      };
+      if (typeof t.function.description === "string") {
+        out.description = t.function.description;
+      }
+      return out;
+    });
+  return translated.length > 0 ? translated : undefined;
+};
+
+export const translateToolChoiceToAnthropic = (
+  choice: OpenAIToolChoice | undefined,
+):
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "none" }
+  | { type: "tool"; name: string }
+  | undefined => {
+  if (!choice) return undefined;
+  if (choice === "auto") return { type: "auto" };
+  if (choice === "none") return { type: "none" };
+  if (choice === "required") return { type: "any" };
+  if (
+    typeof choice === "object" &&
+    choice.type === "function" &&
+    choice.function &&
+    typeof choice.function.name === "string"
+  ) {
+    return { type: "tool", name: choice.function.name };
+  }
+  return undefined;
 };
 
 /**
@@ -394,16 +544,43 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
     type: "text";
     text: string;
   }>;
+  const toolUseBlocks = response.content.filter((block) => block.type === "tool_use") as Array<{
+    type: "tool_use";
+    id: string;
+    name: string;
+    input: unknown;
+  }>;
+
   const joined = textBlocks.map((block) => block.text).join("\n").trim();
 
-  // When nothing survives the filter, surface a synthetic marker so clients
-  // don't render `(no response)`. This makes regressions loud instead of silent.
-  const content =
-    joined.length > 0
-      ? joined
-      : `[empty response from downstream — stop_reason=${
-          response.stop_reason ?? "unknown"
-        }, blocks=${response.content.map((b) => b.type).join(",") || "none"}]`;
+  const tool_calls: OpenAIToolCall[] | undefined =
+    toolUseBlocks.length > 0
+      ? toolUseBlocks.map((b) => ({
+          id: b.id,
+          type: "function" as const,
+          function: {
+            name: b.name,
+            // OpenAI spec requires a JSON-encoded string for arguments.
+            arguments:
+              typeof b.input === "string" ? b.input : JSON.stringify(b.input ?? {}),
+          },
+        }))
+      : undefined;
+
+  // Content resolution:
+  //   - text present → use joined text
+  //   - no text but tool_calls present → null (canonical OpenAI shape)
+  //   - nothing → synthetic empty-response marker so regressions are loud
+  let content: string | null;
+  if (joined.length > 0) {
+    content = joined;
+  } else if (tool_calls) {
+    content = null;
+  } else {
+    content = `[empty response from downstream — stop_reason=${
+      response.stop_reason ?? "unknown"
+    }, blocks=${response.content.map((b) => b.type).join(",") || "none"}]`;
+  }
 
   const inputTokens = response.usage.input_tokens;
   const outputTokens = response.usage.output_tokens;
@@ -419,6 +596,7 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
         message: {
           role: "assistant",
           content,
+          ...(tool_calls ? { tool_calls } : {}),
         },
         finish_reason: anthropicStopReasonToOpenAI(response.stop_reason),
       },
@@ -459,6 +637,9 @@ const callAnthropicSdk = async (
     ? systemBlocks.reduce((sum, b) => sum + b.text.length, 0)
     : (systemBlocks?.length ?? 0);
 
+  const anthropicTools = translateToolsToAnthropic(req.tools);
+  const anthropicToolChoice = translateToolChoiceToAnthropic(req.tool_choice);
+
   downstreamLogger.info({
     event: "mux.anthropic_request",
     requestedModel: route.requestedModel,
@@ -469,6 +650,8 @@ const callAnthropicSdk = async (
     rawMessageCount: req.messages.length,
     rawRoles: req.messages.map((m) => m.role),
     messages: summarizeMessagesForLog(messages),
+    toolsCount: anthropicTools?.length ?? 0,
+    toolChoice: anthropicToolChoice ?? null,
   });
 
   try {
@@ -479,15 +662,25 @@ const callAnthropicSdk = async (
       system: systemBlocks as any,
       messages: messages as any,
       stream: false,
+      ...(anthropicTools ? { tools: anthropicTools as any } : {}),
+      ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice as any } : {}),
     });
 
     const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
       type: "text";
       text: string;
     }>;
+    const toolUseBlocks = response.content.filter((b) => b.type === "tool_use") as Array<{
+      type: "tool_use";
+      name: string;
+    }>;
     const joinedTextLength = textBlocks.reduce((sum, b) => sum + b.text.length, 0);
     const blockTypes = response.content.map((b) => b.type);
-    const empty = textBlocks.length === 0 || joinedTextLength === 0;
+    // A response with tool_use blocks is not empty — the model is calling a
+    // tool, even if it produced no user-visible text. Only warn when there is
+    // genuinely nothing for the client to render or act on.
+    const empty =
+      toolUseBlocks.length === 0 && (textBlocks.length === 0 || joinedTextLength === 0);
 
     const respEvent = {
       event: "mux.anthropic_response",
@@ -499,6 +692,8 @@ const callAnthropicSdk = async (
       blockCount: response.content.length,
       blockTypes,
       textBlockCount: textBlocks.length,
+      toolUseBlockCount: toolUseBlocks.length,
+      toolNames: toolUseBlocks.map((b) => b.name),
       joinedTextLength,
       empty,
     };
