@@ -162,7 +162,7 @@ curl -s http://localhost:8787/v1/chat/completions \
 
 - If the request is for a Claude model (`claude-*`) and `ANTHROPIC_MODEL_MAP` includes it, that Anthropic-specific mapping wins.
 - Else, for Max runtime Claude requests (`runtime: max` or `x-runtime: max`), Mux applies a first-pass Anthropic policy:
-  - lightweight/general chat → `claude-3-5-haiku-latest`
+  - lightweight/general chat → `claude-sonnet-4-6`
   - coding/debug/troubleshooting → `claude-sonnet-4-6`
   - deeper planning/complex reasoning → `claude-opus-4-6`
 - Else, if `MODEL_MAP` includes the requested model, that mapping wins.

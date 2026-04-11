@@ -250,17 +250,22 @@ const toAnthropicInput = (req: ChatCompletionsRequest): {
   const messages = req.messages
     .filter((m) => m.role !== "system")
     .map((m) => {
-      const text = normalizeContentToText(m.content);
+      const text = normalizeContentToText(m.content).trim();
       return {
         role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-        content: [
-          {
-            type: "text" as const,
-            text: m.role === "tool" ? `[tool]\n${text}` : text,
-          },
-        ],
+        text: m.role === "tool" ? `[tool]\n${text}` : text,
       };
-    });
+    })
+    .filter((m) => m.text.length > 0)
+    .map((m) => ({
+      role: m.role,
+      content: [
+        {
+          type: "text" as const,
+          text: m.text,
+        },
+      ],
+    }));
 
   return { system: system || undefined, messages };
 };

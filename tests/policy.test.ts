@@ -64,7 +64,7 @@ describe("resolveRoute", () => {
     const previousModelMap = config.modelMap;
     const previousAnthropicModelMap = config.anthropicModelMap;
     config.modelMap = {
-      "claude-3-7-sonnet-latest": "claude-3-5-haiku-latest",
+      "claude-3-7-sonnet-latest": "claude-sonnet-4-6",
     };
     config.anthropicModelMap = {
       "claude-3-7-sonnet-latest": "claude-sonnet-4-6",
@@ -94,7 +94,7 @@ describe("resolveRoute", () => {
       messages: [{ role: "user", content: "give me a quick summary" }],
     });
 
-    expect(route.resolvedModel).toBe("claude-3-5-haiku-latest");
+    expect(route.resolvedModel).toBe("claude-sonnet-4-6");
     expect(route.routeReason).toBe("heuristic:max_anthropic_lightweight");
 
     config.modelMap = previousModelMap;
@@ -108,7 +108,7 @@ describe("resolveRoute", () => {
     config.anthropicModelMap = {};
 
     const route = resolveRoute({
-      model: "claude-3-5-haiku-latest",
+      model: "claude-sonnet-4-6",
       runtime: "max",
       messages: [{ role: "user", content: "debug this TypeScript stack trace" }],
     });

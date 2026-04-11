@@ -99,7 +99,7 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
 
       return {
         requestedModel,
-        resolvedModel: "claude-3-5-haiku-latest",
+        resolvedModel: "claude-sonnet-4-6",
         routeReason: "heuristic:max_anthropic_lightweight",
         provider: config.defaultProvider,
         backendTarget: config.defaultBackendTarget,

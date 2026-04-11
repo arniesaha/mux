@@ -91,7 +91,7 @@ function streamChatCompletion(res: express.Response, completion: {
 
 export const createApp = () => {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "20mb" }));
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "mux", env: config.nodeEnv });
@@ -110,7 +110,8 @@ export const createApp = () => {
     }
 
     const runtime = body.runtime || req.header("x-runtime") || "unknown";
-    const route = resolveRoute(body);
+    const routedBody: ChatCompletionsRequest = { ...body, runtime };
+    const route = resolveRoute(routedBody);
 
     logger.info({
       event: "mux.route_decision",
@@ -128,9 +129,9 @@ export const createApp = () => {
         incomingAuthorizationHeader: req.header("authorization") ?? undefined,
       };
 
-      const downstream = await callDownstream(body, route, downstreamContext);
+      const downstream = await callDownstream(routedBody, route, downstreamContext);
 
-      if (body.stream) {
+      if (routedBody.stream) {
         streamChatCompletion(res, downstream);
         return;
       }
