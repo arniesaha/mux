@@ -5,6 +5,7 @@ import {
   __resetAnthropicClientForTests,
   callDownstream,
   DownstreamNotConfiguredError,
+  anthropicStopReasonToOpenAI,
   downstreamLogger,
   toAnthropicInput,
   toOpenAIResponse,
@@ -621,5 +622,44 @@ describe("toOpenAIResponse", () => {
 
     expect(response.choices[0]!.message.content).toContain("[empty response");
     expect(response.choices[0]!.message.content).toContain("max_tokens");
+  });
+
+  it("translates Anthropic stop_reason into OpenAI finish_reason", () => {
+    const build = (stopReason: string) =>
+      toOpenAIResponse(
+        {
+          id: "msg_x",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: stopReason,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        } as unknown as Parameters<typeof toOpenAIResponse>[0],
+        "claude-sonnet-4-6",
+      );
+
+    expect(build("end_turn").choices[0]!.finish_reason).toBe("stop");
+    expect(build("stop_sequence").choices[0]!.finish_reason).toBe("stop");
+    expect(build("max_tokens").choices[0]!.finish_reason).toBe("length");
+    expect(build("tool_use").choices[0]!.finish_reason).toBe("tool_calls");
+  });
+});
+
+describe("anthropicStopReasonToOpenAI", () => {
+  it("maps Anthropic stop_reason values to the OpenAI vocabulary", () => {
+    expect(anthropicStopReasonToOpenAI("end_turn")).toBe("stop");
+    expect(anthropicStopReasonToOpenAI("stop_sequence")).toBe("stop");
+    expect(anthropicStopReasonToOpenAI("refusal")).toBe("stop");
+    expect(anthropicStopReasonToOpenAI("pause_turn")).toBe("stop");
+    expect(anthropicStopReasonToOpenAI("max_tokens")).toBe("length");
+    expect(anthropicStopReasonToOpenAI("model_context_window_exceeded")).toBe("length");
+    expect(anthropicStopReasonToOpenAI("tool_use")).toBe("tool_calls");
+    expect(anthropicStopReasonToOpenAI(null)).toBe("stop");
+    expect(anthropicStopReasonToOpenAI(undefined)).toBe("stop");
+    // Unknown values fall back to "stop" instead of throwing, so an
+    // unrecognized Anthropic value never poisons downstream agents.
+    expect(anthropicStopReasonToOpenAI("totally_made_up" as any)).toBe("stop");
   });
 });
