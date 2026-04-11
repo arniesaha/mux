@@ -15,12 +15,22 @@ const logger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
 });
 
+type StreamToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
 function streamChatCompletion(res: express.Response, completion: {
   id: string;
   created: number;
   model: string;
   choices?: Array<{
-    message?: { role?: "assistant"; content?: string };
+    message?: {
+      role?: "assistant";
+      content?: string | null;
+      tool_calls?: StreamToolCall[];
+    };
     finish_reason?: string;
   }>;
   usage?: {
@@ -29,7 +39,9 @@ function streamChatCompletion(res: express.Response, completion: {
     total_tokens: number;
   };
 }) {
-  const text = completion.choices?.[0]?.message?.content ?? "";
+  const msg = completion.choices?.[0]?.message;
+  const text = typeof msg?.content === "string" ? msg.content : "";
+  const toolCalls = msg?.tool_calls;
   const finishReason = completion.choices?.[0]?.finish_reason ?? "stop";
 
   res.status(200);
@@ -41,7 +53,24 @@ function streamChatCompletion(res: express.Response, completion: {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  // Emit one content delta chunk. This is enough for OpenAI-compatible stream consumers.
+  // Emit one delta chunk containing both content and tool_calls. OpenAI
+  // stream consumers read tool_calls off the delta and accumulate them — a
+  // single chunk with the full shape is accepted by pi-ai and friends.
+  const delta: Record<string, unknown> = {
+    role: "assistant",
+  };
+  if (text.length > 0) {
+    delta.content = text;
+  }
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+    delta.tool_calls = toolCalls.map((tc, i) => ({
+      index: i,
+      id: tc.id,
+      type: tc.type,
+      function: tc.function,
+    }));
+  }
+
   writeChunk({
     id: completion.id,
     object: "chat.completion.chunk",
@@ -50,10 +79,7 @@ function streamChatCompletion(res: express.Response, completion: {
     choices: [
       {
         index: 0,
-        delta: {
-          role: "assistant",
-          content: text,
-        },
+        delta,
         finish_reason: null,
       },
     ],
