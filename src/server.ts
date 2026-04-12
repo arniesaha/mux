@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 import { config } from "./config.js";
 import { initTracing } from "./tracing.js";
 
-initTracing();
+await initTracing();
 
 const app = createApp();
 

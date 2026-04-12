@@ -5,13 +5,11 @@ let enabled = false;
 
 export const tracingEnabled = () => enabled;
 
-export const initTracing = () => {
+export const initTracing = async () => {
   if (!config.agentweaveOtlpEndpoint) return;
 
   try {
-    // Dynamic import isn't needed — agentweave-sdk is a regular dependency.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { AgentWeaveConfig } = require("agentweave-sdk");
+    const { AgentWeaveConfig } = await import("agentweave-sdk");
     AgentWeaveConfig.setup({
       agentId: config.agentweaveAgentId,
       otlpEndpoint: config.agentweaveOtlpEndpoint,
