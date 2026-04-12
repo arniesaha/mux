@@ -82,4 +82,6 @@ export const config = {
     process.env.DOWNSTREAM_MOCK_FALLBACK,
     process.env.NODE_ENV !== "production",
   ),
+  agentweaveOtlpEndpoint: process.env.AGENTWEAVE_OTLP_ENDPOINT || null,
+  agentweaveAgentId: process.env.AGENTWEAVE_AGENT_ID || "mux-router",
 };

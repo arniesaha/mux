@@ -7,6 +7,7 @@ import type express from "express";
 import pino from "pino";
 
 import { config } from "./config.js";
+import { withLlmSpan, setSpanAttrs } from "./tracing.js";
 import type {
   ChatCompletionsRequest,
   OpenAIToolCall,
@@ -136,44 +137,55 @@ const callOpenAICompatible = async (
   route: RouteDecision,
   context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
+  return withLlmSpan("openai-compatible", route.resolvedModel, async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
 
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    ...config.downstreamExtraHeaders,
-  };
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...config.downstreamExtraHeaders,
+    };
 
-  const authHeader = resolveAuthHeader(context);
-  if (authHeader) {
-    if (config.downstreamAuthMode === "x-api-key") {
-      headers["x-api-key"] = authHeader;
-    } else {
-      headers.authorization = authHeader;
-    }
-  }
-
-  const payload = {
-    ...req,
-    model: route.resolvedModel,
-  };
-
-  try {
-    const response = await fetch(`${config.downstreamBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new DownstreamRequestError(response.status, await parseJsonSafely(response));
+    const authHeader = resolveAuthHeader(context);
+    if (authHeader) {
+      if (config.downstreamAuthMode === "x-api-key") {
+        headers["x-api-key"] = authHeader;
+      } else {
+        headers.authorization = authHeader;
+      }
     }
 
-    return (await response.json()) as DownstreamResponse;
-  } finally {
-    clearTimeout(timeout);
-  }
+    const payload = {
+      ...req,
+      model: route.resolvedModel,
+    };
+
+    try {
+      const response = await fetch(`${config.downstreamBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new DownstreamRequestError(response.status, await parseJsonSafely(response));
+      }
+
+      const result = (await response.json()) as DownstreamResponse;
+
+      setSpanAttrs({
+        "prov.llm.prompt_tokens": result.usage?.prompt_tokens ?? 0,
+        "prov.llm.completion_tokens": result.usage?.completion_tokens ?? 0,
+        "prov.llm.total_tokens": result.usage?.total_tokens ?? 0,
+        "prov.llm.stop_reason": result.choices?.[0]?.finish_reason ?? "unknown",
+      });
+
+      return result;
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
 };
 
 let anthropicClient: Anthropic | null = null;
@@ -706,55 +718,61 @@ const callAnthropicSdk = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
 ): Promise<DownstreamResponse> => {
-  const { client, params } = prepareAnthropicCall(req, route, false);
+  return withLlmSpan("anthropic", route.resolvedModel, async () => {
+    const { client, params } = prepareAnthropicCall(req, route, false);
 
-  try {
-    const response = await client.messages.create({
-      ...(params as any),
-      stream: false,
-    });
+    try {
+      const response = await client.messages.create({
+        ...(params as any),
+        stream: false,
+      });
 
-    const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
-      type: "text";
-      text: string;
-    }>;
-    const toolUseBlocks = response.content.filter((b) => b.type === "tool_use") as Array<{
-      type: "tool_use";
-      name: string;
-    }>;
-    const joinedTextLength = textBlocks.reduce((sum, b) => sum + b.text.length, 0);
-    const blockTypes = response.content.map((b) => b.type);
-    // A response with tool_use blocks is not empty — the model is calling a
-    // tool, even if it produced no user-visible text. Only warn when there is
-    // genuinely nothing for the client to render or act on.
-    const empty =
-      toolUseBlocks.length === 0 && (textBlocks.length === 0 || joinedTextLength === 0);
+      const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
+        type: "text";
+        text: string;
+      }>;
+      const toolUseBlocks = response.content.filter((b) => b.type === "tool_use") as Array<{
+        type: "tool_use";
+        name: string;
+      }>;
+      const joinedTextLength = textBlocks.reduce((sum, b) => sum + b.text.length, 0);
+      const blockTypes = response.content.map((b) => b.type);
+      const empty =
+        toolUseBlocks.length === 0 && (textBlocks.length === 0 || joinedTextLength === 0);
 
-    const respEvent = {
-      event: "mux.anthropic_response",
-      resolvedModel: route.resolvedModel,
-      stopReason: response.stop_reason ?? null,
-      stopSequence: response.stop_sequence ?? null,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      blockCount: response.content.length,
-      blockTypes,
-      textBlockCount: textBlocks.length,
-      toolUseBlockCount: toolUseBlocks.length,
-      toolNames: toolUseBlocks.map((b) => b.name),
-      joinedTextLength,
-      empty,
-    };
-    if (empty) {
-      downstreamLogger.warn(respEvent);
-    } else {
-      downstreamLogger.info(respEvent);
+      setSpanAttrs({
+        "prov.llm.prompt_tokens": response.usage.input_tokens,
+        "prov.llm.completion_tokens": response.usage.output_tokens,
+        "prov.llm.total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+        "prov.llm.stop_reason": anthropicStopReasonToOpenAI(response.stop_reason) ?? "unknown",
+      });
+
+      const respEvent = {
+        event: "mux.anthropic_response",
+        resolvedModel: route.resolvedModel,
+        stopReason: response.stop_reason ?? null,
+        stopSequence: response.stop_sequence ?? null,
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        blockCount: response.content.length,
+        blockTypes,
+        textBlockCount: textBlocks.length,
+        toolUseBlockCount: toolUseBlocks.length,
+        toolNames: toolUseBlocks.map((b) => b.name),
+        joinedTextLength,
+        empty,
+      };
+      if (empty) {
+        downstreamLogger.warn(respEvent);
+      } else {
+        downstreamLogger.info(respEvent);
+      }
+
+      return toOpenAIResponse(response, route.resolvedModel);
+    } catch (error) {
+      throw handleAnthropicSdkError(error, route);
     }
-
-    return toOpenAIResponse(response, route.resolvedModel);
-  } catch (error) {
-    throw handleAnthropicSdkError(error, route);
-  }
+  });
 };
 
 export const callDownstream = async (
@@ -793,6 +811,12 @@ type ToolCallAccum = {
   argsLength: number;
 };
 
+export type StreamResult = {
+  inputTokens: number;
+  outputTokens: number;
+  stopReason: string | null;
+};
+
 // Consume an async-iterable of Anthropic RawMessageStreamEvents and write
 // OpenAI-shaped chat.completion.chunk SSE frames to `res`. Returns once the
 // stream is fully drained (or a terminal error chunk has been written). The
@@ -803,7 +827,7 @@ export const streamAnthropicToOpenAI = async (
   model: string,
   logCtx: StreamLogCtx,
   onAbort?: () => void,
-): Promise<void> => {
+): Promise<StreamResult> => {
   const streamId = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -994,6 +1018,8 @@ export const streamAnthropicToOpenAI = async (
   } finally {
     res.off("close", onClose);
   }
+
+  return { inputTokens, outputTokens, stopReason: finalStopReason };
 };
 
 export const streamDownstream = async (
@@ -1005,46 +1031,55 @@ export const streamDownstream = async (
     throw new Error("streamDownstream is only supported in anthropic-sdk mode");
   }
 
-  const { client, params } = prepareAnthropicCall(req, route, true);
+  await withLlmSpan("anthropic", route.resolvedModel, async () => {
+    const { client, params } = prepareAnthropicCall(req, route, true);
 
-  // Stream-start errors (auth, 4xx) surface here BEFORE any bytes hit the
-  // wire. Convert to DownstreamRequestError so app.ts's existing 502 branch
-  // sends a JSON error response.
-  let stream: Awaited<ReturnType<typeof client.messages.create>>;
-  try {
-    stream = (await client.messages.create({
-      ...(params as any),
-      stream: true,
-    })) as any;
-  } catch (error) {
-    throw handleAnthropicSdkError(error, route);
-  }
+    // Stream-start errors (auth, 4xx) surface here BEFORE any bytes hit the
+    // wire. Convert to DownstreamRequestError so app.ts's existing 502 branch
+    // sends a JSON error response.
+    let stream: Awaited<ReturnType<typeof client.messages.create>>;
+    try {
+      stream = (await client.messages.create({
+        ...(params as any),
+        stream: true,
+      })) as any;
+    } catch (error) {
+      throw handleAnthropicSdkError(error, route);
+    }
 
-  // Once the stream object exists, the SDK has received HTTP headers — from
-  // here on, we own the response body and MUST NOT throw past app.ts.
-  if (!res.headersSent) {
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-  }
+    // Once the stream object exists, the SDK has received HTTP headers — from
+    // here on, we own the response body and MUST NOT throw past app.ts.
+    if (!res.headersSent) {
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+    }
 
-  const abortable = stream as unknown as {
-    controller?: AbortController;
-    [Symbol.asyncIterator]: () => AsyncIterator<RawMessageStreamEvent>;
-  };
+    const abortable = stream as unknown as {
+      controller?: AbortController;
+      [Symbol.asyncIterator]: () => AsyncIterator<RawMessageStreamEvent>;
+    };
 
-  await streamAnthropicToOpenAI(
-    abortable as AsyncIterable<RawMessageStreamEvent>,
-    res,
-    route.resolvedModel,
-    { requestedModel: route.requestedModel, resolvedModel: route.resolvedModel },
-    () => {
-      try {
-        abortable.controller?.abort();
-      } catch {
-        // best effort
-      }
-    },
-  );
+    const result = await streamAnthropicToOpenAI(
+      abortable as AsyncIterable<RawMessageStreamEvent>,
+      res,
+      route.resolvedModel,
+      { requestedModel: route.requestedModel, resolvedModel: route.resolvedModel },
+      () => {
+        try {
+          abortable.controller?.abort();
+        } catch {
+          // best effort
+        }
+      },
+    );
+
+    setSpanAttrs({
+      "prov.llm.prompt_tokens": result.inputTokens,
+      "prov.llm.completion_tokens": result.outputTokens,
+      "prov.llm.total_tokens": result.inputTokens + result.outputTokens,
+      "prov.llm.stop_reason": anthropicStopReasonToOpenAI(result.stopReason) ?? "unknown",
+    });
+  });
 };

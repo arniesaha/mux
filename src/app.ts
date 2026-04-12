@@ -10,6 +10,7 @@ import {
   type DownstreamRequestContext,
 } from "./downstream.js";
 import { resolveRoute } from "./policy.js";
+import { withTracedRequest, setSpanAttrs } from "./tracing.js";
 import type { ChatCompletionsRequest } from "./types.js";
 
 const logger = pino({
@@ -136,86 +137,97 @@ export const createApp = () => {
       });
     }
 
-    const runtime = body.runtime || req.header("x-runtime") || "unknown";
-    const routedBody: ChatCompletionsRequest = { ...body, runtime };
-    const route = resolveRoute(routedBody);
+    await withTracedRequest("mux", async () => {
+      const runtime = body.runtime || req.header("x-runtime") || "unknown";
+      const routedBody: ChatCompletionsRequest = { ...body, runtime };
+      const route = resolveRoute(routedBody);
 
-    logger.info({
-      event: "mux.route_decision",
-      runtime,
-      requestedModel: route.requestedModel,
-      resolvedModel: route.resolvedModel,
-      routeReason: route.routeReason,
-      provider: route.provider,
-      backendTarget: route.backendTarget,
-      downstreamMode: config.downstreamMode,
-    });
+      setSpanAttrs({
+        "prov.route.requested_model": route.requestedModel,
+        "prov.route.resolved_model": route.resolvedModel,
+        "prov.route.reason": route.routeReason,
+        "prov.route.runtime": runtime,
+      });
 
-    try {
-      const downstreamContext: DownstreamRequestContext = {
-        incomingAuthorizationHeader: req.header("authorization") ?? undefined,
-      };
-
-      if (routedBody.stream && config.downstreamMode === "anthropic-sdk") {
-        await streamDownstream(routedBody, route, res);
-        return;
-      }
-
-      const downstream = await callDownstream(routedBody, route, downstreamContext);
-
-      if (routedBody.stream) {
-        streamChatCompletion(res, downstream);
-        return;
-      }
-
-      return res.status(200).json(downstream);
-    } catch (error) {
-      if (error instanceof DownstreamNotConfiguredError) {
-        logger.warn({
-          event: "mux.downstream_not_configured",
-          runtime,
-          message: error.message,
-        });
-
-        return res.status(503).json({
-          error: {
-            type: "service_unavailable",
-            message: error.message,
-          },
-        });
-      }
-
-      if (error instanceof DownstreamRequestError) {
-        logger.error({
-          event: "mux.downstream_error",
-          runtime,
-          status: error.status,
-          payload: error.payload,
-        });
-
-        return res.status(502).json({
-          error: {
-            type: "downstream_error",
-            message: "Downstream request failed",
-            status: error.status,
-            details: error.payload,
-          },
-        });
-      }
-
-      logger.error({
-        event: "mux.unhandled_error",
+      logger.info({
+        event: "mux.route_decision",
         runtime,
-        err: error,
+        requestedModel: route.requestedModel,
+        resolvedModel: route.resolvedModel,
+        routeReason: route.routeReason,
+        provider: route.provider,
+        backendTarget: route.backendTarget,
+        downstreamMode: config.downstreamMode,
       });
 
-      return res.status(500).json({
-        error: {
-          type: "internal_error",
-          message: "Unexpected server error",
-        },
-      });
-    }
+      try {
+        const downstreamContext: DownstreamRequestContext = {
+          incomingAuthorizationHeader: req.header("authorization") ?? undefined,
+        };
+
+        if (routedBody.stream && config.downstreamMode === "anthropic-sdk") {
+          await streamDownstream(routedBody, route, res);
+          return;
+        }
+
+        const downstream = await callDownstream(routedBody, route, downstreamContext);
+
+        if (routedBody.stream) {
+          streamChatCompletion(res, downstream);
+          return;
+        }
+
+        res.status(200).json(downstream);
+      } catch (error) {
+        if (error instanceof DownstreamNotConfiguredError) {
+          logger.warn({
+            event: "mux.downstream_not_configured",
+            runtime,
+            message: error.message,
+          });
+
+          res.status(503).json({
+            error: {
+              type: "service_unavailable",
+              message: error.message,
+            },
+          });
+          return;
+        }
+
+        if (error instanceof DownstreamRequestError) {
+          logger.error({
+            event: "mux.downstream_error",
+            runtime,
+            status: error.status,
+            payload: error.payload,
+          });
+
+          res.status(502).json({
+            error: {
+              type: "downstream_error",
+              message: "Downstream request failed",
+              status: error.status,
+              details: error.payload,
+            },
+          });
+          return;
+        }
+
+        logger.error({
+          event: "mux.unhandled_error",
+          runtime,
+          err: error,
+        });
+
+        res.status(500).json({
+          error: {
+            type: "internal_error",
+            message: "Unexpected server error",
+          },
+        });
+      }
+    });
   });
 
   return app;
