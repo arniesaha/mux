@@ -833,6 +833,8 @@ export const streamAnthropicToOpenAI = async (
   let nextToolIndex = 0;
   let textLength = 0;
   let finalStopReason: string | null = null;
+  let inputTokens = 0;
+  let outputTokens = 0;
   let phase: string = "start";
   let aborted = false;
   let clientClosed = false;
@@ -862,9 +864,14 @@ export const streamAnthropicToOpenAI = async (
       if (clientClosed) break;
       phase = event.type;
       switch (event.type) {
-        case "message_start":
-          // role chunk already emitted; nothing else to do
+        case "message_start": {
+          // role chunk already emitted; capture input token count from usage
+          const msg = (event as { message?: { usage?: { input_tokens?: number } } }).message;
+          if (msg?.usage && typeof msg.usage.input_tokens === "number") {
+            inputTokens = msg.usage.input_tokens;
+          }
           break;
+        }
         case "content_block_start": {
           const block = (event as { content_block: { type: string; id?: string; name?: string } }).content_block;
           if (block.type === "tool_use") {
@@ -919,9 +926,14 @@ export const streamAnthropicToOpenAI = async (
           // accumulator closes implicitly
           break;
         case "message_delta": {
-          const d = (event as { delta: { stop_reason?: string | null } }).delta;
+          const d = (event as { delta: { stop_reason?: string | null }; usage?: { output_tokens?: number } }).delta;
           if (d && typeof d.stop_reason === "string") {
             finalStopReason = d.stop_reason;
+          }
+          // Anthropic output_tokens is cumulative — always take the latest value
+          const mdUsage = (event as { usage?: { output_tokens?: number } }).usage;
+          if (mdUsage && typeof mdUsage.output_tokens === "number") {
+            outputTokens = mdUsage.output_tokens;
           }
           break;
         }
@@ -940,8 +952,8 @@ export const streamAnthropicToOpenAI = async (
       resolvedModel: logCtx.resolvedModel,
       stopReason: finalStopReason,
       stopSequence: null,
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens,
+      outputTokens,
       blockCount: (textLength > 0 ? 1 : 0) + toolUseBlockCount,
       blockTypes: [
         ...(textLength > 0 ? ["text"] : []),

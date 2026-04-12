@@ -1221,6 +1221,85 @@ describe("streamAnthropicToOpenAI", () => {
     expect(joined.endsWith("data: [DONE]\n\n")).toBe(true);
     expect(res.ended).toBe(true);
   });
+
+  it("logs real input/output token counts from message_start and message_delta", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          usage: { input_tokens: 42, output_tokens: 0 },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 17 },
+      },
+      { type: "message_stop" },
+    ];
+
+    const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+    await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const respEvent = calls.find((c) => c.event === "mux.anthropic_response");
+    expect(respEvent).toBeDefined();
+    expect(respEvent?.inputTokens).toBe(42);
+    expect(respEvent?.outputTokens).toBe(17);
+  });
+
+  it("uses the final cumulative output_tokens when message_delta fires multiple times", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          usage: { input_tokens: 10, output_tokens: 0 },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "a" } },
+      { type: "content_block_stop", index: 0 },
+      // Anthropic emits output_tokens cumulatively — successive message_delta
+      // events should overwrite, not sum. Final value should win.
+      { type: "message_delta", delta: { stop_reason: null }, usage: { output_tokens: 3 } },
+      { type: "message_delta", delta: { stop_reason: null }, usage: { output_tokens: 7 } },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 25 },
+      },
+      { type: "message_stop" },
+    ];
+
+    const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+    await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const respEvent = calls.find((c) => c.event === "mux.anthropic_response");
+    expect(respEvent).toBeDefined();
+    expect(respEvent?.inputTokens).toBe(10);
+    // Must be the last seen value (25), NOT a sum (3 + 7 + 25 = 35).
+    expect(respEvent?.outputTokens).toBe(25);
+  });
 });
 
 describe("streamDownstream", () => {
