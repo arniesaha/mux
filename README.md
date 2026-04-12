@@ -147,7 +147,7 @@ Mux uses the official `@anthropic-ai/sdk` directly.
 ```bash
 DOWNSTREAM_MODE=anthropic-sdk
 ANTHROPIC_OAUTH_TOKEN=sk-ant-oat01-...
-ANTHROPIC_BASE_URL=http://192.168.1.70:30400
+ANTHROPIC_BASE_URL=http://arnabsnas.local:30400
 DOWNSTREAM_TIMEOUT_MS=30000
 ```
 
@@ -155,6 +155,10 @@ Notes:
 - Keep sending OpenAI-compatible requests to Mux (`/v1/chat/completions`); Mux translates to Anthropic Messages API internally.
 - `ANTHROPIC_API_KEY` can be used instead of `ANTHROPIC_OAUTH_TOKEN` for non-OAuth setups.
 - In `anthropic-sdk` mode, LiteLLM/OpenAI downstream auth settings are ignored.
+
+### Local DNS / hosting
+
+Mux is hosted on a NAS that advertises itself as `arnabsnas.local` via avahi/mDNS. LAN clients should prefer `arnabsnas.local:<PORT>` over raw IPs so setups survive DHCP lease changes without needing router DNS entries. Co-resident services on the NAS can still hit `localhost:<PORT>` for loopback performance.
 
 ### Test
 
@@ -197,7 +201,7 @@ curl -s http://localhost:8787/v1/chat/completions \
     - and `DOWNSTREAM_MOCK_FALLBACK=false`, Mux returns `503 service_unavailable`
 - `DOWNSTREAM_MODE=anthropic-sdk`:
   - Mux calls Anthropic via Node SDK (`@anthropic-ai/sdk`) using `ANTHROPIC_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`).
-  - Optional `ANTHROPIC_BASE_URL` supports proxy endpoints like `http://192.168.1.70:30400`.
+  - Optional `ANTHROPIC_BASE_URL` supports proxy endpoints like `http://arnabsnas.local:30400`.
   - Current limitations: no streaming support yet and chat role mapping is text-only (system/user/assistant; `tool` is flattened to text).
 
 ### Environment variables
