@@ -56,7 +56,7 @@ const isAnthropicModel = (model: string): boolean => {
 const isMaxRuntime = (runtime: string | undefined): boolean => {
   if (!runtime) return false;
   const normalized = runtime.toLowerCase();
-  return normalized === "max" || normalized === "pi-mono" || normalized === "pimono";
+  return normalized === "max" || normalized === "agent-max" || normalized === "pi-mono" || normalized === "pimono";
 };
 
 const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
