@@ -112,7 +112,15 @@ const parseJsonSafely = async (response: Response): Promise<unknown> => {
 
 export type DownstreamRequestContext = {
   incomingAuthorizationHeader?: string;
+  agentweaveHeaders?: Record<string, string>;
 };
+
+const buildAgentweaveHeaders = (context?: DownstreamRequestContext): Record<string, string> => ({
+  "x-agentweave-agent-id": config.agentweaveAgentId,
+  "x-agentweave-session-id": "mux",
+  "x-agentweave-project": "mux",
+  ...context?.agentweaveHeaders,
+});
 
 const resolveAuthHeader = (context?: DownstreamRequestContext): string | null => {
   if (config.downstreamAuthMode === "none") return null;
@@ -377,17 +385,11 @@ const getAnthropicClient = (): Anthropic => {
           "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
           "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
           "x-app": "cli",
-          "x-agentweave-agent-id": config.agentweaveAgentId,
-          "x-agentweave-session-id": "mux",
-          "x-agentweave-project": "mux",
         }
       : {
           accept: "application/json",
           "anthropic-dangerous-direct-browser-access": "true",
           "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-          "x-agentweave-agent-id": config.agentweaveAgentId,
-          "x-agentweave-session-id": "mux",
-          "x-agentweave-project": "mux",
         },
   });
   anthropicClientKey = cacheKey;
@@ -723,6 +725,7 @@ const handleAnthropicSdkError = (
 const callAnthropicSdk = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
+  context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
   return withLlmSpan("anthropic", route.resolvedModel, async () => {
     const { client, params } = prepareAnthropicCall(req, route, false);
@@ -731,7 +734,7 @@ const callAnthropicSdk = async (
       const response = await client.messages.create({
         ...(params as any),
         stream: false,
-      });
+      }, { headers: buildAgentweaveHeaders(context) });
 
       const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
         type: "text";
@@ -787,7 +790,7 @@ export const callDownstream = async (
   context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
   if (config.downstreamMode === "anthropic-sdk") {
-    return callAnthropicSdk(req, route);
+    return callAnthropicSdk(req, route, context);
   }
 
   if (!config.downstreamBaseUrl) {
@@ -1032,6 +1035,7 @@ export const streamDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   res: express.Response,
+  context?: DownstreamRequestContext,
 ): Promise<void> => {
   if (config.downstreamMode !== "anthropic-sdk") {
     throw new Error("streamDownstream is only supported in anthropic-sdk mode");
@@ -1048,7 +1052,7 @@ export const streamDownstream = async (
       stream = (await client.messages.create({
         ...(params as any),
         stream: true,
-      })) as any;
+      }, { headers: buildAgentweaveHeaders(context) })) as any;
     } catch (error) {
       throw handleAnthropicSdkError(error, route);
     }

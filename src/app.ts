@@ -171,12 +171,22 @@ export const createApp = () => {
       });
 
       try {
+        // Forward any X-AgentWeave-* headers from the caller so the proxy
+        // can attribute the call to the original agent/session.
+        const agentweaveHeaders: Record<string, string> = {};
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (typeof value === "string" && key.startsWith("x-agentweave-")) {
+            agentweaveHeaders[key] = value;
+          }
+        }
+
         const downstreamContext: DownstreamRequestContext = {
           incomingAuthorizationHeader: req.header("authorization") ?? undefined,
+          agentweaveHeaders,
         };
 
         if (routedBody.stream && config.downstreamMode === "anthropic-sdk") {
-          await streamDownstream(routedBody, route, res);
+          await streamDownstream(routedBody, route, res, downstreamContext);
           return;
         }
 
