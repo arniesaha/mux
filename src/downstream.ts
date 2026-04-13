@@ -377,11 +377,15 @@ const getAnthropicClient = (): Anthropic => {
           "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
           "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
           "x-app": "cli",
+          "x-agentweave-agent-id": config.agentweaveAgentId,
+          "x-agentweave-project": "mux",
         }
       : {
           accept: "application/json",
           "anthropic-dangerous-direct-browser-access": "true",
           "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
+          "x-agentweave-agent-id": config.agentweaveAgentId,
+          "x-agentweave-project": "mux",
         },
   });
   anthropicClientKey = cacheKey;
