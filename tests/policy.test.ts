@@ -94,6 +94,29 @@ describe("resolveRoute", () => {
       messages: [{ role: "user", content: "give me a quick summary" }],
     });
 
+    expect(route.resolvedModel).toBe("claude-haiku-4-5-20251001");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_haiku_simple");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("routes Max multi-turn Claude prompts to Sonnet (not Haiku)", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-sonnet-4-6",
+      runtime: "max",
+      messages: [
+        { role: "user", content: "help me with this" },
+        { role: "assistant", content: "sure, what do you need?" },
+        { role: "user", content: "make it better" },
+      ],
+    });
+
     expect(route.resolvedModel).toBe("claude-sonnet-4-6");
     expect(route.routeReason).toBe("heuristic:max_anthropic_lightweight");
 

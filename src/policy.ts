@@ -59,6 +59,17 @@ const isMaxRuntime = (runtime: string | undefined): boolean => {
   return normalized === "max" || normalized === "pi-mono" || normalized === "pimono";
 };
 
+const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
+  // Single user message, no tools, short content → Haiku-eligible
+  if (req.tools && req.tools.length > 0) return false;
+  if (req.messages.length > 2) return false; // allow 1 system + 1 user at most
+  const userMessages = req.messages.filter((m) => m.role === "user");
+  if (userMessages.length !== 1) return false;
+  const content = userMessages[0].content;
+  const textLength = typeof content === "string" ? content.length : JSON.stringify(content).length;
+  return textLength < 200;
+};
+
 export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
   const requestedModel = req.model;
 
@@ -92,6 +103,16 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
           requestedModel,
           resolvedModel: "claude-sonnet-4-6",
           routeReason: "heuristic:max_anthropic_coding",
+          provider: config.defaultProvider,
+          backendTarget: config.defaultBackendTarget,
+        };
+      }
+
+      if (isSimplePrompt(req)) {
+        return {
+          requestedModel,
+          resolvedModel: "claude-haiku-4-5-20251001",
+          routeReason: "heuristic:max_anthropic_haiku_simple",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
         };
