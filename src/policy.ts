@@ -27,6 +27,28 @@ const containsMaxCodingCue = (text: string): boolean => {
     "troubleshoot",
     "terminal",
     "cli",
+    // Task-oriented verbs — these signal real work, not simple queries
+    "implement",
+    "build",
+    "create",
+    "write",
+    "deploy",
+    "update",
+    "modify",
+    "change",
+    "configure",
+    "setup",
+    "set up",
+    "migrate",
+    "test",
+    "review",
+    "merge",
+    "release",
+    "feature",
+    "issue",
+    "ticket",
+    "pick up",
+    "work on",
   ];
   return containsAny(text, cues);
 };
@@ -67,7 +89,7 @@ const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
   if (!lastUserMsg) return false;
   const content = lastUserMsg.content;
   const textLength = typeof content === "string" ? content.length : JSON.stringify(content).length;
-  return textLength < 200;
+  return textLength < 80;
 };
 
 export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {

@@ -144,6 +144,25 @@ describe("resolveRoute", () => {
     config.anthropicModelMap = previousAnthropicModelMap;
   });
 
+  it("routes Max task-oriented prompts to Sonnet, not Haiku", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-sonnet-4-6",
+      runtime: "max",
+      messages: [{ role: "user", content: "implement issue number seven" }],
+    });
+
+    expect(route.resolvedModel).toBe("claude-sonnet-4-6");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_coding");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
   it("routes Max coding/debug Claude prompts to Sonnet", () => {
     const previousModelMap = config.modelMap;
     const previousAnthropicModelMap = config.anthropicModelMap;
