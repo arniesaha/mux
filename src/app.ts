@@ -142,11 +142,21 @@ export const createApp = () => {
       const routedBody: ChatCompletionsRequest = { ...body, runtime };
       const route = resolveRoute(routedBody);
 
+      // Extract a short prompt preview from the last user message for tracing
+      const lastUserMsg = [...body.messages].reverse().find(m => m.role === "user");
+      const promptPreview = typeof lastUserMsg?.content === "string"
+        ? lastUserMsg.content.slice(0, 200)
+        : Array.isArray(lastUserMsg?.content)
+          ? (lastUserMsg.content.find((b: any) => b.type === "text") as any)?.text?.slice(0, 200) ?? ""
+          : "";
+
       setSpanAttrs({
         "prov.route.requested_model": route.requestedModel,
         "prov.route.resolved_model": route.resolvedModel,
         "prov.route.reason": route.routeReason,
         "prov.route.runtime": runtime,
+        "prov.llm.prompt_preview": promptPreview,
+        "prov.route.message_count": body.messages.length,
       });
 
       logger.info({

@@ -378,6 +378,7 @@ const getAnthropicClient = (): Anthropic => {
           "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
           "x-app": "cli",
           "x-agentweave-agent-id": config.agentweaveAgentId,
+          "x-agentweave-session-id": "mux",
           "x-agentweave-project": "mux",
         }
       : {
@@ -385,6 +386,7 @@ const getAnthropicClient = (): Anthropic => {
           "anthropic-dangerous-direct-browser-access": "true",
           "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
           "x-agentweave-agent-id": config.agentweaveAgentId,
+          "x-agentweave-session-id": "mux",
           "x-agentweave-project": "mux",
         },
   });
