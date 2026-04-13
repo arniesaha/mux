@@ -60,12 +60,11 @@ const isMaxRuntime = (runtime: string | undefined): boolean => {
 };
 
 const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
-  // Single user message, no tools, short content → Haiku-eligible
+  // No tools and short last user message → Haiku-eligible
   if (req.tools && req.tools.length > 0) return false;
-  if (req.messages.length > 2) return false; // allow 1 system + 1 user at most
-  const userMessages = req.messages.filter((m) => m.role === "user");
-  if (userMessages.length !== 1) return false;
-  const content = userMessages[0].content;
+  const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+  if (!lastUserMsg) return false;
+  const content = lastUserMsg.content;
   const textLength = typeof content === "string" ? content.length : JSON.stringify(content).length;
   return textLength < 200;
 };
@@ -86,12 +85,12 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
     }
 
     if (isMaxRuntime(req.runtime)) {
-      // Only check user messages for routing cues — system prompts contain
-      // keywords like "reason" and "analyze" that would falsely escalate.
-      const transcript = req.messages
-        .filter((m) => m.role === "user")
-        .map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content))
-        .join("\n");
+      // Only check the LAST user message for routing cues — system prompts
+      // and conversation history contain keywords that falsely escalate.
+      const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+      const transcript = lastUserMsg
+        ? (typeof lastUserMsg.content === "string" ? lastUserMsg.content : JSON.stringify(lastUserMsg.content))
+        : "";
 
       if (containsMaxDeepReasoningCue(transcript)) {
         return {
@@ -144,11 +143,11 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
     };
   }
 
-  const userTranscript = req.messages
-    .filter((m) => m.role === "user")
-    .map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content))
-    .join("\n");
-  const escalation = containsEscalationCue(userTranscript);
+  const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+  const lastUserText = lastUserMsg
+    ? (typeof lastUserMsg.content === "string" ? lastUserMsg.content : JSON.stringify(lastUserMsg.content))
+    : "";
+  const escalation = containsEscalationCue(lastUserText);
 
   if (requestedModel === "gpt-4o" && !escalation) {
     return {

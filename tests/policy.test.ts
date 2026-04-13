@@ -101,7 +101,7 @@ describe("resolveRoute", () => {
     config.anthropicModelMap = previousAnthropicModelMap;
   });
 
-  it("routes Max multi-turn Claude prompts to Sonnet (not Haiku)", () => {
+  it("routes to Haiku when last user message is simple even in multi-turn", () => {
     const previousModelMap = config.modelMap;
     const previousAnthropicModelMap = config.anthropicModelMap;
     config.modelMap = {};
@@ -115,6 +115,26 @@ describe("resolveRoute", () => {
         { role: "assistant", content: "sure, what do you need?" },
         { role: "user", content: "make it better" },
       ],
+    });
+
+    expect(route.resolvedModel).toBe("claude-haiku-4-5-20251001");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_haiku_simple");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("routes to Sonnet when tools are present even if prompt is short", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute({
+      model: "claude-sonnet-4-6",
+      runtime: "max",
+      messages: [{ role: "user", content: "check status" }],
+      tools: [{ type: "function", function: { name: "get_status", parameters: {} } }],
     });
 
     expect(route.resolvedModel).toBe("claude-sonnet-4-6");
