@@ -60,8 +60,9 @@ const isMaxRuntime = (runtime: string | undefined): boolean => {
 };
 
 const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
-  // No tools and short last user message → Haiku-eligible
-  if (req.tools && req.tools.length > 0) return false;
+  // Short last user message with no complexity cues → Haiku-eligible.
+  // Tools may be present (Max always sends its full toolset) but Haiku
+  // can handle them and won't invoke them for trivial prompts.
   const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
   if (!lastUserMsg) return false;
   const content = lastUserMsg.content;

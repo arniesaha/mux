@@ -124,7 +124,7 @@ describe("resolveRoute", () => {
     config.anthropicModelMap = previousAnthropicModelMap;
   });
 
-  it("routes to Sonnet when tools are present even if prompt is short", () => {
+  it("routes to Haiku for simple prompt even when tools are present", () => {
     const previousModelMap = config.modelMap;
     const previousAnthropicModelMap = config.anthropicModelMap;
     config.modelMap = {};
@@ -137,8 +137,8 @@ describe("resolveRoute", () => {
       tools: [{ type: "function", function: { name: "get_status", parameters: {} } }],
     });
 
-    expect(route.resolvedModel).toBe("claude-sonnet-4-6");
-    expect(route.routeReason).toBe("heuristic:max_anthropic_lightweight");
+    expect(route.resolvedModel).toBe("claude-haiku-4-5-20251001");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_haiku_simple");
 
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
