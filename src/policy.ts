@@ -86,7 +86,12 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
     }
 
     if (isMaxRuntime(req.runtime)) {
-      const transcript = req.messages.map((m) => m.content).join("\n");
+      // Only check user messages for routing cues — system prompts contain
+      // keywords like "reason" and "analyze" that would falsely escalate.
+      const transcript = req.messages
+        .filter((m) => m.role === "user")
+        .map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content))
+        .join("\n");
 
       if (containsMaxDeepReasoningCue(transcript)) {
         return {
@@ -139,8 +144,11 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
     };
   }
 
-  const transcript = req.messages.map((m) => m.content).join("\n");
-  const escalation = containsEscalationCue(transcript);
+  const userTranscript = req.messages
+    .filter((m) => m.role === "user")
+    .map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content))
+    .join("\n");
+  const escalation = containsEscalationCue(userTranscript);
 
   if (requestedModel === "gpt-4o" && !escalation) {
     return {
