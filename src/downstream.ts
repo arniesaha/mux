@@ -1031,14 +1031,158 @@ export const streamAnthropicToOpenAI = async (
   return { inputTokens, outputTokens, stopReason: finalStopReason };
 };
 
+const emitDownstreamResponseAsSse = (res: express.Response, completion: DownstreamResponse): void => {
+  if (!res.headersSent) {
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+  }
+  const msg = completion.choices?.[0]?.message;
+  const text = typeof msg?.content === "string" ? msg.content : "";
+  const finishReason = completion.choices?.[0]?.finish_reason ?? "stop";
+  const write = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+  const created = completion.created;
+  const id = completion.id;
+  const model = completion.model;
+
+  write({
+    id, object: "chat.completion.chunk", created, model,
+    choices: [{ index: 0, delta: { role: "assistant", ...(text ? { content: text } : {}) }, finish_reason: null }],
+  });
+  write({
+    id, object: "chat.completion.chunk", created, model,
+    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+  });
+  if (completion.usage) {
+    write({ id, object: "chat.completion.chunk", created, model, choices: [], usage: completion.usage });
+  }
+  res.write("data: [DONE]\n\n");
+  res.end();
+};
+
+const streamOpenAICompatible = async (
+  req: ChatCompletionsRequest,
+  route: RouteDecision,
+  res: express.Response,
+  context?: DownstreamRequestContext,
+): Promise<void> => {
+  // Mock / not-configured fallback — mirror callDownstream's behavior so
+  // local dev without a real gateway still responds with SSE.
+  if (!config.downstreamBaseUrl) {
+    if (config.downstreamMockFallbackEnabled) {
+      emitDownstreamResponseAsSse(res, buildMockResponse(req, route));
+      return;
+    }
+    throw new DownstreamNotConfiguredError(
+      "DOWNSTREAM_BASE_URL is required when DOWNSTREAM_MOCK_FALLBACK=false",
+    );
+  }
+
+  await withLlmSpan("openai-compatible", route.resolvedModel, async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      ...config.downstreamExtraHeaders,
+    };
+
+    const authHeader = resolveAuthHeader(context);
+    if (authHeader) {
+      if (config.downstreamAuthMode === "x-api-key") {
+        headers["x-api-key"] = authHeader;
+      } else {
+        headers.authorization = authHeader;
+      }
+    }
+
+    const payload = {
+      ...req,
+      model: route.resolvedModel,
+      stream: true,
+    };
+
+    try {
+      const response = await fetch(`${config.downstreamBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        // Failure BEFORE any bytes hit the wire — throw so app.ts's 502 branch
+        // can send a JSON error response.
+        throw new DownstreamRequestError(response.status, await parseJsonSafely(response));
+      }
+
+      if (!response.body) {
+        throw new DownstreamRequestError(502, { message: "empty response body from downstream" });
+      }
+
+      // Headers go out once we know the downstream accepted the stream.
+      if (!res.headersSent) {
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+      }
+
+      // Abort the upstream fetch if the client disconnects mid-stream.
+      const onClientClose = () => {
+        try {
+          controller.abort();
+        } catch {
+          // best effort
+        }
+      };
+      res.once("close", onClientClose);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      try {
+        // Pipe through — both sides speak OpenAI SSE, no translation needed.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) {
+            res.write(decoder.decode(value, { stream: true }));
+          }
+        }
+        const tail = decoder.decode();
+        if (tail) res.write(tail);
+      } finally {
+        res.off("close", onClientClose);
+        try {
+          reader.releaseLock();
+        } catch {
+          // best effort
+        }
+      }
+
+      res.end();
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+};
+
 export const streamDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   res: express.Response,
   context?: DownstreamRequestContext,
 ): Promise<void> => {
+  if (config.downstreamMode === "openai-compatible") {
+    return streamOpenAICompatible(req, route, res, context);
+  }
+
   if (config.downstreamMode !== "anthropic-sdk") {
-    throw new Error("streamDownstream is only supported in anthropic-sdk mode");
+    throw new Error(`streamDownstream: unsupported downstreamMode=${config.downstreamMode}`);
   }
 
   await withLlmSpan("anthropic", route.resolvedModel, async () => {

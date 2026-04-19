@@ -1508,4 +1508,137 @@ describe("streamDownstream", () => {
       restore();
     }
   });
+
+  // --- openai-compatible streaming (issue #36) --------------------------------
+
+  const setupOpenAICompat = () => {
+    const previousMode = config.downstreamMode;
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousApiKey = config.downstreamApiKey;
+    const previousAuthMode = config.downstreamAuthMode;
+
+    config.downstreamMode = "openai-compatible";
+    config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
+    config.downstreamApiKey = "test-key";
+    config.downstreamAuthMode = "bearer";
+
+    return () => {
+      config.downstreamMode = previousMode;
+      config.downstreamBaseUrl = previousBaseUrl;
+      config.downstreamApiKey = previousApiKey;
+      config.downstreamAuthMode = previousAuthMode;
+    };
+  };
+
+  const openaiSseFrames = [
+    `data: ${JSON.stringify({
+      id: "chatcmpl-stream-1",
+      object: "chat.completion.chunk",
+      created: 1700000000,
+      model: "gpt-4o-mini",
+      choices: [{ index: 0, delta: { role: "assistant", content: "hi" }, finish_reason: null }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "chatcmpl-stream-1",
+      object: "chat.completion.chunk",
+      created: 1700000000,
+      model: "gpt-4o-mini",
+      choices: [{ index: 0, delta: { content: " there" }, finish_reason: null }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "chatcmpl-stream-1",
+      object: "chat.completion.chunk",
+      created: 1700000000,
+      model: "gpt-4o-mini",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    })}\n\n`,
+    `data: [DONE]\n\n`,
+  ];
+
+  it("pipes OpenAI SSE through when downstreamMode=openai-compatible", async () => {
+    const restore = setupOpenAICompat();
+    try {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse(openaiSseFrames));
+
+      const res = makeStubRes();
+      await streamDownstream(
+        {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        route,
+        res as unknown as import("express").Response,
+      );
+
+      expect(res.headers["Content-Type"]).toContain("text/event-stream");
+      const parsed = parseSseFrames(res.writes);
+      expect(parsed[parsed.length - 1]).toBe("[DONE]");
+      const chunks = parsed.filter((f): f is Record<string, unknown> => f !== "[DONE]");
+      const content = chunks
+        .map((c: any) => c.choices?.[0]?.delta?.content)
+        .filter(Boolean)
+        .join("");
+      expect(content).toBe("hi there");
+    } finally {
+      restore();
+    }
+  });
+
+  it("forwards stream:true in the upstream request body for openai-compatible", async () => {
+    const restore = setupOpenAICompat();
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(sseResponse(openaiSseFrames));
+
+      const res = makeStubRes();
+      await streamDownstream(
+        {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        route,
+        res as unknown as import("express").Response,
+      );
+
+      const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect(body.stream).toBe(true);
+      expect(body.model).toBe(route.resolvedModel);
+    } finally {
+      restore();
+    }
+  });
+
+  it("throws DownstreamRequestError on non-2xx before any bytes hit the wire (openai-compatible)", async () => {
+    const restore = setupOpenAICompat();
+    try {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: "bad" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const res = makeStubRes();
+      await expect(
+        streamDownstream(
+          {
+            model: "gpt-4o",
+            messages: [{ role: "user", content: "hi" }],
+            stream: true,
+          },
+          route,
+          res as unknown as import("express").Response,
+        ),
+      ).rejects.toBeInstanceOf(DownstreamRequestError);
+
+      expect(res.writes).toHaveLength(0);
+      expect(res.ended).toBe(false);
+    } finally {
+      restore();
+    }
+  });
 });
