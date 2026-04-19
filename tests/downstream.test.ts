@@ -484,6 +484,102 @@ describe("callDownstream", () => {
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamMockFallbackEnabled = previousFallback;
   });
+
+  // --- instrumentation (issue #37) --------------------------------------------
+
+  it("fires mux.downstream_request and mux.downstream_response for non-streaming calls", async () => {
+    const previousMode = config.downstreamMode;
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousApiKey = config.downstreamApiKey;
+    const previousAuthMode = config.downstreamAuthMode;
+
+    config.downstreamMode = "openai-compatible";
+    config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
+    config.downstreamApiKey = "test-key";
+    config.downstreamAuthMode = "bearer";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          created: 123,
+          model: "gpt-4o-mini",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+    await callDownstream(requestPayload, route);
+
+    const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+
+    const reqEvent = calls.find((c) => c.event === "mux.downstream_request");
+    expect(reqEvent).toBeDefined();
+    expect(reqEvent?.resolvedModel).toBe("gpt-4o-mini");
+    expect(reqEvent?.requestedModel).toBe("gpt-4o");
+    expect(reqEvent?.url).toBe("http://127.0.0.1:4000/v1/chat/completions");
+    expect(reqEvent?.authMode).toBe("bearer");
+    expect(reqEvent?.streamed).toBe(false);
+
+    const respEvent = calls.find((c) => c.event === "mux.downstream_response");
+    expect(respEvent).toBeDefined();
+    expect(respEvent?.status).toBe(200);
+    expect(respEvent?.model).toBe("gpt-4o-mini");
+    expect(respEvent?.inputTokens).toBe(7);
+    expect(respEvent?.outputTokens).toBe(3);
+    expect(respEvent?.totalTokens).toBe(10);
+    expect(respEvent?.stopReason).toBe("stop");
+    expect(respEvent?.streamed).toBe(false);
+    expect(typeof respEvent?.latencyMs).toBe("number");
+
+    config.downstreamMode = previousMode;
+    config.downstreamBaseUrl = previousBaseUrl;
+    config.downstreamApiKey = previousApiKey;
+    config.downstreamAuthMode = previousAuthMode;
+  });
+
+  it("fires mux.downstream_error on non-2xx response", async () => {
+    const previousMode = config.downstreamMode;
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousApiKey = config.downstreamApiKey;
+    const previousAuthMode = config.downstreamAuthMode;
+
+    config.downstreamMode = "openai-compatible";
+    config.downstreamBaseUrl = "http://127.0.0.1:4000/v1";
+    config.downstreamApiKey = "test-key";
+    config.downstreamAuthMode = "bearer";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "nope" } }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const errorSpy = vi.spyOn(downstreamLogger, "error");
+
+    await expect(callDownstream(requestPayload, route)).rejects.toBeInstanceOf(
+      DownstreamRequestError,
+    );
+
+    const calls = errorSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const errEvent = calls.find((c) => c.event === "mux.downstream_error");
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.status).toBe(401);
+    expect(errEvent?.resolvedModel).toBe("gpt-4o-mini");
+
+    config.downstreamMode = previousMode;
+    config.downstreamBaseUrl = previousBaseUrl;
+    config.downstreamApiKey = previousApiKey;
+    config.downstreamAuthMode = previousAuthMode;
+  });
 });
 
 describe("toAnthropicInput", () => {
@@ -1607,6 +1703,40 @@ describe("streamDownstream", () => {
       const body = JSON.parse(init.body as string);
       expect(body.stream).toBe(true);
       expect(body.model).toBe(route.resolvedModel);
+    } finally {
+      restore();
+    }
+  });
+
+  it("fires mux.downstream_request and mux.downstream_response for streaming openai-compatible", async () => {
+    const restore = setupOpenAICompat();
+    try {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse(openaiSseFrames));
+      const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+      const res = makeStubRes();
+      await streamDownstream(
+        {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        route,
+        res as unknown as import("express").Response,
+      );
+
+      const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+
+      const reqEvent = calls.find((c) => c.event === "mux.downstream_request");
+      expect(reqEvent).toBeDefined();
+      expect(reqEvent?.resolvedModel).toBe("gpt-4o-mini");
+      expect(reqEvent?.streamed).toBe(true);
+
+      const respEvent = calls.find((c) => c.event === "mux.downstream_response");
+      expect(respEvent).toBeDefined();
+      expect(respEvent?.status).toBe(200);
+      expect(respEvent?.streamed).toBe(true);
+      expect(typeof respEvent?.latencyMs).toBe("number");
     } finally {
       restore();
     }

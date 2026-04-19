@@ -140,6 +140,26 @@ const resolveAuthHeader = (context?: DownstreamRequestContext): string | null =>
   return `Bearer ${token}`;
 };
 
+const logDownstreamRequest = (
+  req: ChatCompletionsRequest,
+  route: RouteDecision,
+  url: string,
+  streamed: boolean,
+): void => {
+  downstreamLogger.info({
+    event: "mux.downstream_request",
+    requestedModel: route.requestedModel,
+    resolvedModel: route.resolvedModel,
+    url,
+    authMode: config.downstreamAuthMode,
+    timeoutMs: config.downstreamTimeoutMs,
+    messageCount: req.messages.length,
+    rawRoles: req.messages.map((m) => m.role),
+    toolsCount: req.tools?.length ?? 0,
+    streamed,
+  });
+};
+
 const callOpenAICompatible = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
@@ -168,8 +188,12 @@ const callOpenAICompatible = async (
       model: route.resolvedModel,
     };
 
+    const url = `${config.downstreamBaseUrl}/chat/completions`;
+    logDownstreamRequest(req, route, url, false);
+    const startedAt = Date.now();
+
     try {
-      const response = await fetch(`${config.downstreamBaseUrl}/chat/completions`, {
+      const response = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
@@ -177,16 +201,39 @@ const callOpenAICompatible = async (
       });
 
       if (!response.ok) {
-        throw new DownstreamRequestError(response.status, await parseJsonSafely(response));
+        const body = await parseJsonSafely(response);
+        downstreamLogger.error({
+          event: "mux.downstream_error",
+          resolvedModel: route.resolvedModel,
+          status: response.status,
+          latencyMs: Date.now() - startedAt,
+          body,
+          streamed: false,
+        });
+        throw new DownstreamRequestError(response.status, body);
       }
 
       const result = (await response.json()) as DownstreamResponse;
+      const latencyMs = Date.now() - startedAt;
 
       setSpanAttrs({
         "prov.llm.prompt_tokens": result.usage?.prompt_tokens ?? 0,
         "prov.llm.completion_tokens": result.usage?.completion_tokens ?? 0,
         "prov.llm.total_tokens": result.usage?.total_tokens ?? 0,
         "prov.llm.stop_reason": result.choices?.[0]?.finish_reason ?? "unknown",
+      });
+
+      downstreamLogger.info({
+        event: "mux.downstream_response",
+        resolvedModel: route.resolvedModel,
+        status: response.status,
+        model: result.model ?? null,
+        inputTokens: result.usage?.prompt_tokens ?? null,
+        outputTokens: result.usage?.completion_tokens ?? null,
+        totalTokens: result.usage?.total_tokens ?? null,
+        stopReason: result.choices?.[0]?.finish_reason ?? null,
+        latencyMs,
+        streamed: false,
       });
 
       return result;
@@ -1105,8 +1152,12 @@ const streamOpenAICompatible = async (
       stream: true,
     };
 
+    const url = `${config.downstreamBaseUrl}/chat/completions`;
+    logDownstreamRequest(req, route, url, true);
+    const startedAt = Date.now();
+
     try {
-      const response = await fetch(`${config.downstreamBaseUrl}/chat/completions`, {
+      const response = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
@@ -1116,7 +1167,16 @@ const streamOpenAICompatible = async (
       if (!response.ok) {
         // Failure BEFORE any bytes hit the wire — throw so app.ts's 502 branch
         // can send a JSON error response.
-        throw new DownstreamRequestError(response.status, await parseJsonSafely(response));
+        const body = await parseJsonSafely(response);
+        downstreamLogger.error({
+          event: "mux.downstream_error",
+          resolvedModel: route.resolvedModel,
+          status: response.status,
+          latencyMs: Date.now() - startedAt,
+          body,
+          streamed: true,
+        });
+        throw new DownstreamRequestError(response.status, body);
       }
 
       if (!response.body) {
@@ -1143,6 +1203,7 @@ const streamOpenAICompatible = async (
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let bytesStreamed = 0;
       try {
         // Pipe through — both sides speak OpenAI SSE, no translation needed.
         // eslint-disable-next-line no-constant-condition
@@ -1150,6 +1211,7 @@ const streamOpenAICompatible = async (
           const { done, value } = await reader.read();
           if (done) break;
           if (value && value.length) {
+            bytesStreamed += value.length;
             res.write(decoder.decode(value, { stream: true }));
           }
         }
@@ -1165,6 +1227,18 @@ const streamOpenAICompatible = async (
       }
 
       res.end();
+
+      downstreamLogger.info({
+        event: "mux.downstream_response",
+        resolvedModel: route.resolvedModel,
+        status: response.status,
+        // Usage + model come over the wire in chunks; we don't parse SSE here
+        // (pipe-through path). #37 scope: latency + bytes is what we can
+        // observe without adding a parsing step.
+        bytesStreamed,
+        latencyMs: Date.now() - startedAt,
+        streamed: true,
+      });
     } finally {
       clearTimeout(timeout);
     }
