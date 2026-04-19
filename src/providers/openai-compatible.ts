@@ -4,7 +4,6 @@ import { setSpanAttrs, withLlmSpan } from "../tracing.js";
 import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
 import {
   buildMockResponse,
-  DownstreamNotConfiguredError,
   DownstreamRequestError,
   downstreamLogger,
   emitDownstreamResponseAsSse,
@@ -264,8 +263,3 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
 
 // Register at module load so the registry can instantiate.
 registerAdapter("openai-compatible", createOpenAICompatibleProvider);
-
-// Suppress unused-import warning for DownstreamNotConfiguredError — kept in
-// the import list so the module is the single point of truth for future
-// "no base URL, no mock fallback" branching.
-void DownstreamNotConfiguredError;
