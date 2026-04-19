@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type {
   Message,
   RawMessageStreamEvent,
@@ -7,7 +6,12 @@ import type express from "express";
 import pino from "pino";
 
 import { config } from "./config.js";
-import { withLlmSpan, setSpanAttrs } from "./tracing.js";
+import { getProvider } from "./providers/registry.js";
+// Side-effect import: adapter modules call registerAdapter() on load. Placed
+// here (not only in app.ts) so tests that import downstream.ts directly still
+// get adapters registered. The circular import is safe: adapters only USE
+// downstream's exports inside closures, not at module-eval time.
+import "./providers/index.js";
 import type {
   ChatCompletionsRequest,
   OpenAIToolCall,
@@ -20,8 +24,6 @@ export const downstreamLogger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
   name: "mux.downstream",
 });
-
-const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 
 export type DownstreamResponse = {
   id: string;
@@ -70,7 +72,7 @@ const estimateTokens = (req: ChatCompletionsRequest): number => {
   return Math.max(1, Math.ceil(JSON.stringify(req.messages).length / 4));
 };
 
-const buildMockResponse = (
+export const buildMockResponse = (
   req: ChatCompletionsRequest,
   route: RouteDecision,
 ): DownstreamResponse => {
@@ -99,7 +101,7 @@ const buildMockResponse = (
   };
 };
 
-const parseJsonSafely = async (response: Response): Promise<unknown> => {
+export const parseJsonSafely = async (response: Response): Promise<unknown> => {
   const text = await response.text();
   if (!text) return null;
 
@@ -115,146 +117,18 @@ export type DownstreamRequestContext = {
   agentweaveHeaders?: Record<string, string>;
 };
 
-const buildAgentweaveHeaders = (context?: DownstreamRequestContext): Record<string, string> => ({
+export const buildAgentweaveHeaders = (context?: DownstreamRequestContext): Record<string, string> => ({
   "x-agentweave-agent-id": config.agentweaveAgentId,
   "x-agentweave-session-id": "mux",
   "x-agentweave-project": "mux",
   ...context?.agentweaveHeaders,
 });
 
-const resolveAuthHeader = (context?: DownstreamRequestContext): string | null => {
-  if (config.downstreamAuthMode === "none") return null;
-
-  if (config.downstreamAuthMode === "passthrough") {
-    const value = context?.incomingAuthorizationHeader?.trim();
-    return value ? value : null;
-  }
-
-  const token = config.downstreamApiKey?.trim();
-  if (!token) return null;
-
-  if (config.downstreamAuthMode === "x-api-key") {
-    return token;
-  }
-
-  return `Bearer ${token}`;
-};
-
-const logDownstreamRequest = (
-  req: ChatCompletionsRequest,
-  route: RouteDecision,
-  url: string,
-  streamed: boolean,
-): void => {
-  downstreamLogger.info({
-    event: "mux.downstream_request",
-    requestedModel: route.requestedModel,
-    resolvedModel: route.resolvedModel,
-    url,
-    authMode: config.downstreamAuthMode,
-    timeoutMs: config.downstreamTimeoutMs,
-    messageCount: req.messages.length,
-    rawRoles: req.messages.map((m) => m.role),
-    toolsCount: req.tools?.length ?? 0,
-    streamed,
-  });
-};
-
-const callOpenAICompatible = async (
-  req: ChatCompletionsRequest,
-  route: RouteDecision,
-  context?: DownstreamRequestContext,
-): Promise<DownstreamResponse> => {
-  return withLlmSpan("openai-compatible", route.resolvedModel, async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
-
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      ...config.downstreamExtraHeaders,
-    };
-
-    const authHeader = resolveAuthHeader(context);
-    if (authHeader) {
-      if (config.downstreamAuthMode === "x-api-key") {
-        headers["x-api-key"] = authHeader;
-      } else {
-        headers.authorization = authHeader;
-      }
-    }
-
-    const payload = {
-      ...req,
-      model: route.resolvedModel,
-    };
-
-    const url = `${config.downstreamBaseUrl}/chat/completions`;
-    logDownstreamRequest(req, route, url, false);
-    const startedAt = Date.now();
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const body = await parseJsonSafely(response);
-        downstreamLogger.error({
-          event: "mux.downstream_error",
-          resolvedModel: route.resolvedModel,
-          status: response.status,
-          latencyMs: Date.now() - startedAt,
-          body,
-          streamed: false,
-        });
-        throw new DownstreamRequestError(response.status, body);
-      }
-
-      const result = (await response.json()) as DownstreamResponse;
-      const latencyMs = Date.now() - startedAt;
-
-      setSpanAttrs({
-        "prov.llm.prompt_tokens": result.usage?.prompt_tokens ?? 0,
-        "prov.llm.completion_tokens": result.usage?.completion_tokens ?? 0,
-        "prov.llm.total_tokens": result.usage?.total_tokens ?? 0,
-        "prov.llm.stop_reason": result.choices?.[0]?.finish_reason ?? "unknown",
-      });
-
-      downstreamLogger.info({
-        event: "mux.downstream_response",
-        resolvedModel: route.resolvedModel,
-        status: response.status,
-        model: result.model ?? null,
-        inputTokens: result.usage?.prompt_tokens ?? null,
-        outputTokens: result.usage?.completion_tokens ?? null,
-        totalTokens: result.usage?.total_tokens ?? null,
-        stopReason: result.choices?.[0]?.finish_reason ?? null,
-        latencyMs,
-        streamed: false,
-      });
-
-      return result;
-    } finally {
-      clearTimeout(timeout);
-    }
-  });
-};
-
-let anthropicClient: Anthropic | null = null;
-let anthropicClientKey: string | null = null;
-
-// Test-only: drop the cached Anthropic client so a fresh one is constructed
-// on the next call. Needed because the SDK captures a `fetch` reference at
-// construction time, which survives `vi.restoreAllMocks()`.
-export const __resetAnthropicClientForTests = () => {
-  anthropicClient = null;
-  anthropicClientKey = null;
-};
-
-const CLAUDE_CODE_VERSION = "2.1.62";
+// Test-only: drop all provider-internal caches (chiefly the Anthropic SDK
+// client, which captures a `fetch` reference at construction and survives
+// `vi.restoreAllMocks()`). Delegates to the provider registry which rebuilds
+// providers on next access, so their caches get reset with them.
+export { __resetProviderRegistryForTests as __resetAnthropicClientForTests } from "./providers/registry.js";
 
 const stringifyUnknown = (value: unknown): string => {
   if (typeof value === "string") return value;
@@ -400,48 +274,6 @@ const normalizeContentToText = (content: unknown): string => {
     .filter((b): b is AnthropicTextBlock => b.type === "text")
     .map((b) => b.text)
     .join("\n");
-};
-
-const getAnthropicClient = (): Anthropic => {
-  const oauthToken = config.anthropicOauthToken?.trim();
-  const apiKey = config.anthropicApiKey?.trim();
-  const baseURL = config.anthropicBaseUrl || config.downstreamBaseUrl || undefined;
-
-  if (!oauthToken && !apiKey) {
-    throw new DownstreamNotConfiguredError(
-      "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY is required when DOWNSTREAM_MODE=anthropic-sdk",
-    );
-  }
-
-  const authKind = oauthToken ? "oauth" : "apiKey";
-  const authValue = oauthToken || apiKey!;
-  const cacheKey = `${baseURL ?? "default"}|${authKind}|${authValue}`;
-  if (anthropicClient && anthropicClientKey === cacheKey) {
-    return anthropicClient;
-  }
-
-  anthropicClient = new Anthropic({
-    ...(oauthToken ? { authToken: oauthToken, apiKey: null } : { apiKey: apiKey! }),
-    baseURL,
-    timeout: config.downstreamTimeoutMs,
-    dangerouslyAllowBrowser: true,
-    defaultHeaders: oauthToken
-      ? {
-          accept: "application/json",
-          "anthropic-dangerous-direct-browser-access": "true",
-          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-          "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
-          "x-app": "cli",
-        }
-      : {
-          accept: "application/json",
-          "anthropic-dangerous-direct-browser-access": "true",
-          "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-        },
-  });
-  anthropicClientKey = cacheKey;
-
-  return anthropicClient;
 };
 
 export type AnthropicInputMessage = {
@@ -680,177 +512,22 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
   };
 };
 
-const summarizeMessagesForLog = (messages: AnthropicInputMessage[]) =>
-  messages.map((m, index) => {
-    const textLength = m.content
-      .filter((b): b is AnthropicTextBlock => b.type === "text")
-      .reduce((sum, b) => sum + b.text.length, 0);
-    const imageCount = m.content.filter((b) => b.type === "image").length;
-    return { index, role: m.role, textLength, imageCount, blockCount: m.content.length };
-  });
-
-type PreparedAnthropicCall = {
-  client: Anthropic;
-  params: Record<string, unknown>;
-};
-
-const prepareAnthropicCall = (
-  req: ChatCompletionsRequest,
-  route: RouteDecision,
-  streamed: boolean,
-): PreparedAnthropicCall => {
-  const client = getAnthropicClient();
-  const { system, messages } = toAnthropicInput(req);
-  const isOauth = Boolean(config.anthropicOauthToken?.trim());
-  const systemBlocks = isOauth
-    ? [
-        { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
-        ...(system ? [{ type: "text" as const, text: system }] : []),
-      ]
-    : system;
-
-  const maxTokens = req.max_tokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
-  const systemLength = Array.isArray(systemBlocks)
-    ? systemBlocks.reduce((sum, b) => sum + b.text.length, 0)
-    : (systemBlocks?.length ?? 0);
-
-  const anthropicTools = translateToolsToAnthropic(req.tools);
-  const anthropicToolChoice = translateToolChoiceToAnthropic(req.tool_choice);
-
-  downstreamLogger.info({
-    event: "mux.anthropic_request",
-    requestedModel: route.requestedModel,
-    resolvedModel: route.resolvedModel,
-    maxTokens,
-    systemLength,
-    messageCount: messages.length,
-    rawMessageCount: req.messages.length,
-    rawRoles: req.messages.map((m) => m.role),
-    messages: summarizeMessagesForLog(messages),
-    toolsCount: anthropicTools?.length ?? 0,
-    toolChoice: anthropicToolChoice ?? null,
-    streamed,
-  });
-
-  const params: Record<string, unknown> = {
-    model: route.resolvedModel,
-    max_tokens: maxTokens,
-    temperature: req.temperature,
-    system: systemBlocks,
-    messages,
-  };
-  if (anthropicTools) params.tools = anthropicTools;
-  if (anthropicToolChoice) params.tool_choice = anthropicToolChoice;
-
-  return { client, params };
-};
-
-const handleAnthropicSdkError = (
-  error: unknown,
-  route: RouteDecision,
-): DownstreamRequestError | Error => {
-  if (error instanceof Anthropic.APIError) {
-    downstreamLogger.error({
-      event: "mux.anthropic_api_error",
-      resolvedModel: route.resolvedModel,
-      status: error.status ?? null,
-      name: error.name,
-      message: error.message,
-      body: error.error ?? null,
-    });
-    return new DownstreamRequestError(error.status ?? 500, error.error ?? error.message);
-  }
-
-  downstreamLogger.error({
-    event: "mux.anthropic_unknown_error",
-    resolvedModel: route.resolvedModel,
-    err: error instanceof Error ? { name: error.name, message: error.message } : String(error),
-  });
-  return error instanceof Error ? error : new Error(String(error));
-};
-
-const callAnthropicSdk = async (
-  req: ChatCompletionsRequest,
-  route: RouteDecision,
-  context?: DownstreamRequestContext,
-): Promise<DownstreamResponse> => {
-  return withLlmSpan("anthropic", route.resolvedModel, async () => {
-    const { client, params } = prepareAnthropicCall(req, route, false);
-
-    try {
-      const response = await client.messages.create({
-        ...(params as any),
-        stream: false,
-      }, { headers: buildAgentweaveHeaders(context) });
-
-      const textBlocks = response.content.filter((b) => b.type === "text") as Array<{
-        type: "text";
-        text: string;
-      }>;
-      const toolUseBlocks = response.content.filter((b) => b.type === "tool_use") as Array<{
-        type: "tool_use";
-        name: string;
-      }>;
-      const joinedTextLength = textBlocks.reduce((sum, b) => sum + b.text.length, 0);
-      const blockTypes = response.content.map((b) => b.type);
-      const empty =
-        toolUseBlocks.length === 0 && (textBlocks.length === 0 || joinedTextLength === 0);
-
-      setSpanAttrs({
-        "prov.llm.prompt_tokens": response.usage.input_tokens,
-        "prov.llm.completion_tokens": response.usage.output_tokens,
-        "prov.llm.total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-        "prov.llm.stop_reason": anthropicStopReasonToOpenAI(response.stop_reason) ?? "unknown",
-      });
-
-      const respEvent = {
-        event: "mux.anthropic_response",
-        resolvedModel: route.resolvedModel,
-        stopReason: response.stop_reason ?? null,
-        stopSequence: response.stop_sequence ?? null,
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        blockCount: response.content.length,
-        blockTypes,
-        textBlockCount: textBlocks.length,
-        toolUseBlockCount: toolUseBlocks.length,
-        toolNames: toolUseBlocks.map((b) => b.name),
-        joinedTextLength,
-        empty,
-      };
-      if (empty) {
-        downstreamLogger.warn(respEvent);
-      } else {
-        downstreamLogger.info(respEvent);
-      }
-
-      return toOpenAIResponse(response, route.resolvedModel);
-    } catch (error) {
-      throw handleAnthropicSdkError(error, route);
-    }
-  });
-};
-
 export const callDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
-  if (config.downstreamMode === "anthropic-sdk") {
-    return callAnthropicSdk(req, route, context);
-  }
-
-  if (!config.downstreamBaseUrl) {
-    if (config.downstreamMockFallbackEnabled) {
+  const providerId = route.providerId || "default";
+  const provider = getProvider(providerId);
+  if (!provider) {
+    if (providerId === "default" && config.downstreamMockFallbackEnabled) {
       return buildMockResponse(req, route);
     }
-
     throw new DownstreamNotConfiguredError(
-      "DOWNSTREAM_BASE_URL is required when DOWNSTREAM_MOCK_FALLBACK=false",
+      `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
     );
   }
-
-  return callOpenAICompatible(req, route, context);
+  return provider.call(req, route, context) as Promise<DownstreamResponse>;
 };
 
 // --- Streaming path ------------------------------------------------------
@@ -1078,7 +755,7 @@ export const streamAnthropicToOpenAI = async (
   return { inputTokens, outputTokens, stopReason: finalStopReason };
 };
 
-const emitDownstreamResponseAsSse = (res: express.Response, completion: DownstreamResponse): void => {
+export const emitDownstreamResponseAsSse = (res: express.Response, completion: DownstreamResponse): void => {
   if (!res.headersSent) {
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -1109,205 +786,22 @@ const emitDownstreamResponseAsSse = (res: express.Response, completion: Downstre
   res.end();
 };
 
-const streamOpenAICompatible = async (
-  req: ChatCompletionsRequest,
-  route: RouteDecision,
-  res: express.Response,
-  context?: DownstreamRequestContext,
-): Promise<void> => {
-  // Mock / not-configured fallback — mirror callDownstream's behavior so
-  // local dev without a real gateway still responds with SSE.
-  if (!config.downstreamBaseUrl) {
-    if (config.downstreamMockFallbackEnabled) {
-      emitDownstreamResponseAsSse(res, buildMockResponse(req, route));
-      return;
-    }
-    throw new DownstreamNotConfiguredError(
-      "DOWNSTREAM_BASE_URL is required when DOWNSTREAM_MOCK_FALLBACK=false",
-    );
-  }
-
-  await withLlmSpan("openai-compatible", route.resolvedModel, async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.downstreamTimeoutMs);
-
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      ...config.downstreamExtraHeaders,
-    };
-
-    const authHeader = resolveAuthHeader(context);
-    if (authHeader) {
-      if (config.downstreamAuthMode === "x-api-key") {
-        headers["x-api-key"] = authHeader;
-      } else {
-        headers.authorization = authHeader;
-      }
-    }
-
-    const payload = {
-      ...req,
-      model: route.resolvedModel,
-      stream: true,
-    };
-
-    const url = `${config.downstreamBaseUrl}/chat/completions`;
-    logDownstreamRequest(req, route, url, true);
-    const startedAt = Date.now();
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        // Failure BEFORE any bytes hit the wire — throw so app.ts's 502 branch
-        // can send a JSON error response.
-        const body = await parseJsonSafely(response);
-        downstreamLogger.error({
-          event: "mux.downstream_error",
-          resolvedModel: route.resolvedModel,
-          status: response.status,
-          latencyMs: Date.now() - startedAt,
-          body,
-          streamed: true,
-        });
-        throw new DownstreamRequestError(response.status, body);
-      }
-
-      if (!response.body) {
-        throw new DownstreamRequestError(502, { message: "empty response body from downstream" });
-      }
-
-      // Headers go out once we know the downstream accepted the stream.
-      if (!res.headersSent) {
-        res.status(200);
-        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-        res.setHeader("Cache-Control", "no-cache, no-transform");
-        res.setHeader("Connection", "keep-alive");
-      }
-
-      // Abort the upstream fetch if the client disconnects mid-stream.
-      const onClientClose = () => {
-        try {
-          controller.abort();
-        } catch {
-          // best effort
-        }
-      };
-      res.once("close", onClientClose);
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let bytesStreamed = 0;
-      try {
-        // Pipe through — both sides speak OpenAI SSE, no translation needed.
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value && value.length) {
-            bytesStreamed += value.length;
-            res.write(decoder.decode(value, { stream: true }));
-          }
-        }
-        const tail = decoder.decode();
-        if (tail) res.write(tail);
-      } finally {
-        res.off("close", onClientClose);
-        try {
-          reader.releaseLock();
-        } catch {
-          // best effort
-        }
-      }
-
-      res.end();
-
-      downstreamLogger.info({
-        event: "mux.downstream_response",
-        resolvedModel: route.resolvedModel,
-        status: response.status,
-        // Usage + model come over the wire in chunks; we don't parse SSE here
-        // (pipe-through path). #37 scope: latency + bytes is what we can
-        // observe without adding a parsing step.
-        bytesStreamed,
-        latencyMs: Date.now() - startedAt,
-        streamed: true,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-  });
-};
-
 export const streamDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   res: express.Response,
   context?: DownstreamRequestContext,
 ): Promise<void> => {
-  if (config.downstreamMode === "openai-compatible") {
-    return streamOpenAICompatible(req, route, res, context);
-  }
-
-  if (config.downstreamMode !== "anthropic-sdk") {
-    throw new Error(`streamDownstream: unsupported downstreamMode=${config.downstreamMode}`);
-  }
-
-  await withLlmSpan("anthropic", route.resolvedModel, async () => {
-    const { client, params } = prepareAnthropicCall(req, route, true);
-
-    // Stream-start errors (auth, 4xx) surface here BEFORE any bytes hit the
-    // wire. Convert to DownstreamRequestError so app.ts's existing 502 branch
-    // sends a JSON error response.
-    let stream: Awaited<ReturnType<typeof client.messages.create>>;
-    try {
-      stream = (await client.messages.create({
-        ...(params as any),
-        stream: true,
-      }, { headers: buildAgentweaveHeaders(context) })) as any;
-    } catch (error) {
-      throw handleAnthropicSdkError(error, route);
+  const providerId = route.providerId || "default";
+  const provider = getProvider(providerId);
+  if (!provider) {
+    if (providerId === "default" && config.downstreamMockFallbackEnabled) {
+      emitDownstreamResponseAsSse(res, buildMockResponse(req, route));
+      return;
     }
-
-    // Once the stream object exists, the SDK has received HTTP headers — from
-    // here on, we own the response body and MUST NOT throw past app.ts.
-    if (!res.headersSent) {
-      res.status(200);
-      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("Connection", "keep-alive");
-    }
-
-    const abortable = stream as unknown as {
-      controller?: AbortController;
-      [Symbol.asyncIterator]: () => AsyncIterator<RawMessageStreamEvent>;
-    };
-
-    const result = await streamAnthropicToOpenAI(
-      abortable as AsyncIterable<RawMessageStreamEvent>,
-      res,
-      route.resolvedModel,
-      { requestedModel: route.requestedModel, resolvedModel: route.resolvedModel },
-      () => {
-        try {
-          abortable.controller?.abort();
-        } catch {
-          // best effort
-        }
-      },
+    throw new DownstreamNotConfiguredError(
+      `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
     );
-
-    setSpanAttrs({
-      "prov.llm.prompt_tokens": result.inputTokens,
-      "prov.llm.completion_tokens": result.outputTokens,
-      "prov.llm.total_tokens": result.inputTokens + result.outputTokens,
-      "prov.llm.stop_reason": anthropicStopReasonToOpenAI(result.stopReason) ?? "unknown",
-    });
-  });
+  }
+  return provider.stream(req, route, res, context);
 };

@@ -10,6 +10,10 @@ import {
   type DownstreamRequestContext,
 } from "./downstream.js";
 import { resolveRoute } from "./policy.js";
+// Import the providers barrel for its side-effects — each adapter registers
+// itself with the registry on module load. Must happen before resolveRoute or
+// callDownstream runs.
+import "./providers/index.js";
 import { withTracedRequest, setSpanAttrs } from "./tracing.js";
 import type { ChatCompletionsRequest } from "./types.js";
 
@@ -55,6 +59,7 @@ export const createApp = () => {
         "prov.route.resolved_model": route.resolvedModel,
         "prov.route.reason": route.routeReason,
         "prov.route.runtime": runtime,
+        "prov.route.provider_id": route.providerId,
         "prov.llm.prompt_preview": promptPreview,
         "prov.route.message_count": body.messages.length,
       });
@@ -66,6 +71,7 @@ export const createApp = () => {
         resolvedModel: route.resolvedModel,
         routeReason: route.routeReason,
         provider: route.provider,
+        providerId: route.providerId,
         backendTarget: route.backendTarget,
         downstreamMode: config.downstreamMode,
       });

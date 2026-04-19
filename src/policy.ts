@@ -1,5 +1,61 @@
 import { config } from "./config.js";
+import { listProviders } from "./providers/registry.js";
+import type { Provider } from "./providers/types.js";
 import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
+
+type ProviderSelection = {
+  providerId: string;
+  costWeighted: boolean;
+};
+
+// Pick the cheapest registered provider that declares the given model.
+// When more than one matches, cost-weighted selection fires and the caller
+// annotates the route reason with "+cost_weighted".
+const selectProviderForModel = (
+  resolvedModel: string,
+  providers: Provider[],
+): ProviderSelection | null => {
+  const candidates = providers.filter((p) =>
+    p.models.some((m) => m.id === resolvedModel),
+  );
+  if (candidates.length === 0) return null;
+
+  const cost = (p: Provider): number => {
+    const model = p.models.find((m) => m.id === resolvedModel);
+    if (!model) return Number.POSITIVE_INFINITY;
+    const inCost = model.costInputUsdPerMTok ?? Number.POSITIVE_INFINITY;
+    const outCost = model.costOutputUsdPerMTok ?? Number.POSITIVE_INFINITY;
+    return inCost + outCost;
+  };
+
+  const sorted = [...candidates].sort((a, b) => cost(a) - cost(b));
+  return {
+    providerId: sorted[0]!.id,
+    costWeighted: candidates.length > 1,
+  };
+};
+
+// Resolve providerId + final routeReason. Any single provider registered for
+// the model wins without mutating reason; multiple → cheapest wins and reason
+// gains +cost_weighted. No match → "default" (the dispatcher's mock-fallback
+// or a legacy synthesized provider picks it up).
+const applyProviderSelection = (
+  decision: Omit<RouteDecision, "providerId">,
+  providers?: Provider[],
+): RouteDecision => {
+  const pool = providers ?? listProviders();
+  const selection = selectProviderForModel(decision.resolvedModel, pool);
+  if (!selection) {
+    return { ...decision, providerId: "default" };
+  }
+  return {
+    ...decision,
+    providerId: selection.providerId,
+    routeReason: selection.costWeighted
+      ? `${decision.routeReason}+cost_weighted`
+      : decision.routeReason,
+  };
+};
 
 const containsAny = (text: string, cues: string[]): boolean => {
   const lower = text.toLowerCase();
@@ -92,19 +148,24 @@ const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
   return textLength < 80;
 };
 
-export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
+export const resolveRoute = (
+  req: ChatCompletionsRequest,
+  providers?: Provider[],
+): RouteDecision => {
   const requestedModel = req.model;
+  const finalize = (decision: Omit<RouteDecision, "providerId">): RouteDecision =>
+    applyProviderSelection(decision, providers);
 
   if (isAnthropicModel(requestedModel)) {
     const anthropicMapped = config.anthropicModelMap[requestedModel];
     if (anthropicMapped) {
-      return {
+      return finalize({
         requestedModel,
         resolvedModel: anthropicMapped,
         routeReason: "config:anthropic_model_map_override",
         provider: config.defaultProvider,
         backendTarget: config.defaultBackendTarget,
-      };
+      });
     }
 
     if (isMaxRuntime(req.runtime)) {
@@ -116,54 +177,54 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
         : "";
 
       if (containsMaxDeepReasoningCue(transcript)) {
-        return {
+        return finalize({
           requestedModel,
           resolvedModel: "claude-opus-4-6",
           routeReason: "heuristic:max_anthropic_deep_reasoning",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
-        };
+        });
       }
 
       if (containsMaxCodingCue(transcript)) {
-        return {
+        return finalize({
           requestedModel,
           resolvedModel: "claude-sonnet-4-6",
           routeReason: "heuristic:max_anthropic_coding",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
-        };
+        });
       }
 
       if (isSimplePrompt(req)) {
-        return {
+        return finalize({
           requestedModel,
           resolvedModel: "claude-haiku-4-5-20251001",
           routeReason: "heuristic:max_anthropic_haiku_simple",
           provider: config.defaultProvider,
           backendTarget: config.defaultBackendTarget,
-        };
+        });
       }
 
-      return {
+      return finalize({
         requestedModel,
         resolvedModel: "claude-sonnet-4-6",
         routeReason: "heuristic:max_anthropic_lightweight",
         provider: config.defaultProvider,
         backendTarget: config.defaultBackendTarget,
-      };
+      });
     }
   }
 
   const mapped = config.modelMap[requestedModel];
   if (mapped) {
-    return {
+    return finalize({
       requestedModel,
       resolvedModel: mapped,
       routeReason: "config:model_map_override",
       provider: config.defaultProvider,
       backendTarget: config.defaultBackendTarget,
-    };
+    });
   }
 
   const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
@@ -173,20 +234,20 @@ export const resolveRoute = (req: ChatCompletionsRequest): RouteDecision => {
   const escalation = containsEscalationCue(lastUserText);
 
   if (requestedModel === "gpt-4o" && !escalation) {
-    return {
+    return finalize({
       requestedModel,
       resolvedModel: "gpt-4o-mini",
       routeReason: "heuristic:downgrade_simple_prompt",
       provider: config.defaultProvider,
       backendTarget: config.defaultBackendTarget,
-    };
+    });
   }
 
-  return {
+  return finalize({
     requestedModel,
     resolvedModel: requestedModel,
     routeReason: escalation ? "heuristic:keep_strong_model" : "default:passthrough",
     provider: config.defaultProvider,
     backendTarget: config.defaultBackendTarget,
-  };
+  });
 };

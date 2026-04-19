@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 
+import type { ProviderConfig, ProviderKind } from "./providers/types.js";
+
 dotenv.config();
 
 const parseModelMap = (input: string | undefined): Record<string, string> => {
@@ -43,6 +45,54 @@ const parseDownstreamMode = (input: string | undefined): DownstreamMode => {
   return "openai-compatible";
 };
 
+const parseProviders = (input: string | undefined): ProviderConfig[] => {
+  if (!input?.trim()) return [];
+  try {
+    const parsed = JSON.parse(input);
+    if (!Array.isArray(parsed)) return [];
+    const out: ProviderConfig[] = [];
+    for (const raw of parsed) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      if (typeof r.id !== "string" || !r.id.trim()) continue;
+      if (r.kind !== "openai-compatible" && r.kind !== "anthropic-sdk") continue;
+      const kind = r.kind as ProviderKind;
+      const models = Array.isArray(r.models)
+        ? (r.models as Array<Record<string, unknown>>)
+            .filter((m) => m && typeof m.id === "string")
+            .map((m) => ({
+              id: m.id as string,
+              costInputUsdPerMTok:
+                typeof m.costInputUsdPerMTok === "number" ? m.costInputUsdPerMTok : undefined,
+              costOutputUsdPerMTok:
+                typeof m.costOutputUsdPerMTok === "number" ? m.costOutputUsdPerMTok : undefined,
+            }))
+        : [];
+      const auth =
+        r.auth && typeof r.auth === "object"
+          ? (r.auth as ProviderConfig["auth"])
+          : ({ mode: "none" } as ProviderConfig["auth"]);
+      out.push({
+        id: r.id,
+        kind,
+        baseUrl:
+          typeof r.baseUrl === "string" ? normalizeBaseUrl(r.baseUrl) : null,
+        auth,
+        extraHeaders:
+          r.extraHeaders && typeof r.extraHeaders === "object"
+            ? (r.extraHeaders as Record<string, string>)
+            : undefined,
+        timeoutMs: typeof r.timeoutMs === "number" ? r.timeoutMs : undefined,
+        models,
+      });
+    }
+    return out;
+  } catch {
+    // fall back to empty registry; caller synthesizes a legacy entry
+    return [];
+  }
+};
+
 const parseJsonMap = (input: string | undefined): Record<string, string> => {
   if (!input) return {};
 
@@ -84,4 +134,5 @@ export const config = {
   ),
   agentweaveOtlpEndpoint: process.env.AGENTWEAVE_OTLP_ENDPOINT || null,
   agentweaveAgentId: process.env.AGENTWEAVE_AGENT_ID || "mux-router",
+  providers: parseProviders(process.env.PROVIDERS),
 };

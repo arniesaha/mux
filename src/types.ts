@@ -53,6 +53,11 @@ export type RouteDecision = {
   requestedModel: string;
   resolvedModel: string;
   routeReason: string;
+  // Legacy descriptive fields (kind + target). Kept for log/dashboard
+  // compatibility. New code should use `providerId` for dispatch.
   provider: string;
   backendTarget: string;
+  // The registered provider identifier the dispatcher uses to look up a
+  // concrete backend. Defaults to "default" for legacy single-provider setups.
+  providerId: string;
 };

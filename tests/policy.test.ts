@@ -221,4 +221,99 @@ describe("resolveRoute", () => {
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
   });
+
+  // --- Provider selection (#39 Phase 1) ---------------------------------------
+
+  it("defaults providerId to 'default' when no registered provider serves the model", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const route = resolveRoute(
+      { model: "gpt-4o", messages: [{ role: "user", content: "say hi" }] },
+      /* providers */ [],
+    );
+
+    expect(route.providerId).toBe("default");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("picks the cheapest provider when multiple serve the resolved model (cost-weighted)", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const providers = [
+      {
+        id: "expensive",
+        kind: "anthropic-sdk" as const,
+        models: [
+          { id: "claude-sonnet-4-6", costInputUsdPerMTok: 3, costOutputUsdPerMTok: 15 },
+        ],
+        call: async () => ({} as any),
+        stream: async () => {},
+      },
+      {
+        id: "cheap",
+        kind: "openai-compatible" as const,
+        models: [
+          { id: "claude-sonnet-4-6", costInputUsdPerMTok: 2, costOutputUsdPerMTok: 10 },
+        ],
+        call: async () => ({} as any),
+        stream: async () => {},
+      },
+    ];
+
+    const route = resolveRoute(
+      {
+        model: "claude-sonnet-4-6",
+        runtime: "max",
+        messages: [{ role: "user", content: "refactor this function for me" }],
+      },
+      providers,
+    );
+
+    expect(route.resolvedModel).toBe("claude-sonnet-4-6");
+    expect(route.providerId).toBe("cheap");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_coding+cost_weighted");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
+
+  it("does not annotate route reason when only one provider serves the model", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+
+    const providers = [
+      {
+        id: "only-one",
+        kind: "anthropic-sdk" as const,
+        models: [{ id: "claude-sonnet-4-6" }],
+        call: async () => ({} as any),
+        stream: async () => {},
+      },
+    ];
+
+    const route = resolveRoute(
+      {
+        model: "claude-sonnet-4-6",
+        runtime: "max",
+        messages: [{ role: "user", content: "refactor this function" }],
+      },
+      providers,
+    );
+
+    expect(route.providerId).toBe("only-one");
+    expect(route.routeReason).toBe("heuristic:max_anthropic_coding");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+  });
 });

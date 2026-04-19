@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
 import { config } from "../src/config.js";
+import { __resetProviderRegistryForTests } from "../src/providers/registry.js";
 
 describe("createApp", () => {
   beforeAll(() => {
@@ -81,6 +82,7 @@ describe("createApp", () => {
 
     config.downstreamBaseUrl = null;
     config.downstreamMockFallbackEnabled = false;
+    __resetProviderRegistryForTests();
 
     const res = await request(app).post("/v1/chat/completions").send({
       model: "gpt-4o",
@@ -92,5 +94,6 @@ describe("createApp", () => {
 
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamMockFallbackEnabled = previousFallback;
+    __resetProviderRegistryForTests();
   });
 });
