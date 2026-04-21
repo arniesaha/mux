@@ -5,12 +5,13 @@ import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
 
 type ProviderSelection = {
   providerId: string;
+  fallbacks: string[]; // cost-ordered, primary excluded
   costWeighted: boolean;
 };
 
-// Pick the cheapest registered provider that declares the given model.
-// When more than one matches, cost-weighted selection fires and the caller
-// annotates the route reason with "+cost_weighted".
+// Rank the registered providers that declare the given model by combined
+// input+output cost. The cheapest becomes the primary; the rest form the
+// failover chain. When only one provider matches, fallbacks is empty.
 const selectProviderForModel = (
   resolvedModel: string,
   providers: Provider[],
@@ -31,26 +32,28 @@ const selectProviderForModel = (
   const sorted = [...candidates].sort((a, b) => cost(a) - cost(b));
   return {
     providerId: sorted[0]!.id,
-    costWeighted: candidates.length > 1,
+    fallbacks: sorted.slice(1).map((p) => p.id),
+    costWeighted: sorted.length > 1,
   };
 };
 
-// Resolve providerId + final routeReason. Any single provider registered for
-// the model wins without mutating reason; multiple → cheapest wins and reason
-// gains +cost_weighted. No match → "default" (the dispatcher's mock-fallback
-// or a legacy synthesized provider picks it up).
+// Resolve providerId + fallback chain + final routeReason. Any single provider
+// registered for the model wins without mutating reason; multiple → cheapest
+// wins and reason gains +cost_weighted. No match → "default" (the dispatcher's
+// mock-fallback or a legacy synthesized provider picks it up).
 const applyProviderSelection = (
-  decision: Omit<RouteDecision, "providerId">,
+  decision: Omit<RouteDecision, "providerId" | "fallbackProviderIds">,
   providers?: Provider[],
 ): RouteDecision => {
   const pool = providers ?? listProviders();
   const selection = selectProviderForModel(decision.resolvedModel, pool);
   if (!selection) {
-    return { ...decision, providerId: "default" };
+    return { ...decision, providerId: "default", fallbackProviderIds: [] };
   }
   return {
     ...decision,
     providerId: selection.providerId,
+    fallbackProviderIds: selection.fallbacks,
     routeReason: selection.costWeighted
       ? `${decision.routeReason}+cost_weighted`
       : decision.routeReason,
@@ -153,8 +156,9 @@ export const resolveRoute = (
   providers?: Provider[],
 ): RouteDecision => {
   const requestedModel = req.model;
-  const finalize = (decision: Omit<RouteDecision, "providerId">): RouteDecision =>
-    applyProviderSelection(decision, providers);
+  const finalize = (
+    decision: Omit<RouteDecision, "providerId" | "fallbackProviderIds">,
+  ): RouteDecision => applyProviderSelection(decision, providers);
 
   if (isAnthropicModel(requestedModel)) {
     const anthropicMapped = config.anthropicModelMap[requestedModel];

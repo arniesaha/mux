@@ -60,4 +60,8 @@ export type RouteDecision = {
   // The registered provider identifier the dispatcher uses to look up a
   // concrete backend. Defaults to "default" for legacy single-provider setups.
   providerId: string;
+  // Cost-ordered fallback chain (primary excluded). When the primary returns
+  // a retryable error, the dispatcher walks this list up to
+  // config.failoverMaxAttempts hops. Empty when only one provider matches.
+  fallbackProviderIds: string[];
 };

@@ -280,6 +280,8 @@ describe("resolveRoute", () => {
     expect(route.resolvedModel).toBe("claude-sonnet-4-6");
     expect(route.providerId).toBe("cheap");
     expect(route.routeReason).toBe("heuristic:max_anthropic_coding+cost_weighted");
+    // Primary excluded; more-expensive provider queued as fallback for #45
+    expect(route.fallbackProviderIds).toEqual(["expensive"]);
 
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
@@ -312,6 +314,7 @@ describe("resolveRoute", () => {
 
     expect(route.providerId).toBe("only-one");
     expect(route.routeReason).toBe("heuristic:max_anthropic_coding");
+    expect(route.fallbackProviderIds).toEqual([]);
 
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;

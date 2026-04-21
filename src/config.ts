@@ -22,6 +22,12 @@ const parseNumber = (input: string | undefined, defaultValue: number): number =>
   return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 };
 
+const parseNonNegativeInt = (input: string | undefined, defaultValue: number): number => {
+  if (!input) return defaultValue;
+  const parsed = Number.parseInt(input, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+};
+
 const normalizeBaseUrl = (input: string | undefined): string | null => {
   if (!input?.trim()) return null;
   return input.replace(/\/+$/, "");
@@ -135,4 +141,5 @@ export const config = {
   agentweaveOtlpEndpoint: process.env.AGENTWEAVE_OTLP_ENDPOINT || null,
   agentweaveAgentId: process.env.AGENTWEAVE_AGENT_ID || "mux-router",
   providers: parseProviders(process.env.PROVIDERS),
+  failoverMaxAttempts: parseNonNegativeInt(process.env.FAILOVER_MAX_ATTEMPTS, 1),
 };

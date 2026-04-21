@@ -7,6 +7,7 @@ import pino from "pino";
 
 import { config } from "./config.js";
 import { getProvider } from "./providers/registry.js";
+import { setSpanAttrs } from "./tracing.js";
 // Side-effect import: adapter modules call registerAdapter() on load. Placed
 // here (not only in app.ts) so tests that import downstream.ts directly still
 // get adapters registered. The circular import is safe: adapters only USE
@@ -67,6 +68,26 @@ export class DownstreamRequestError extends Error {
     this.payload = payload;
   }
 }
+
+// Decide whether a downstream failure should trigger cross-provider failover.
+// Retryable: 408/429/5xx from DownstreamRequestError, 401/403 (auth may differ
+// per provider), and network-layer errors (AbortError from our timeout or
+// "fetch failed" from Node's fetch). Non-retryable: 4xx client errors (400,
+// 404, 422) — the request is malformed and won't improve on another provider.
+export const isRetryableDownstreamError = (err: unknown): boolean => {
+  if (err instanceof DownstreamRequestError) {
+    const s = err.status;
+    if (s === 408 || s === 429) return true;
+    if (s >= 500 && s < 600) return true;
+    if (s === 401 || s === 403) return true;
+    return false;
+  }
+  if (err instanceof Error) {
+    if (err.name === "AbortError") return true;
+    if (err.message.toLowerCase().includes("fetch failed")) return true;
+  }
+  return false;
+};
 
 const estimateTokens = (req: ChatCompletionsRequest): number => {
   return Math.max(1, Math.ceil(JSON.stringify(req.messages).length / 4));
@@ -512,22 +533,86 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
   };
 };
 
+// Build the ordered provider chain for this request: primary followed by up
+// to config.failoverMaxAttempts fallbacks. Legacy callers that pass a route
+// without fallbackProviderIds get a single-entry chain.
+const buildProviderChain = (route: RouteDecision): string[] => {
+  const primary = route.providerId || "default";
+  const fallbacks = route.fallbackProviderIds ?? [];
+  const hops = Math.max(0, Math.min(config.failoverMaxAttempts, fallbacks.length));
+  return [primary, ...fallbacks.slice(0, hops)];
+};
+
+const annotateFailoverHop = (
+  i: number,
+  id: string,
+  failedProviders: string[],
+  lastError: unknown,
+): void => {
+  setSpanAttrs({
+    "prov.failover.attempt": i,
+    "prov.failover.failed_providers": failedProviders.join(","),
+    "prov.failover.active_provider": id,
+    "prov.route.provider_id": id,
+  });
+  downstreamLogger.warn({
+    event: "mux.failover_hop",
+    from: failedProviders[failedProviders.length - 1],
+    to: id,
+    attempt: i,
+    reason:
+      lastError instanceof DownstreamRequestError
+        ? `status=${lastError.status}`
+        : lastError instanceof Error
+          ? lastError.name
+          : "unknown",
+  });
+};
+
 export const callDownstream = async (
   req: ChatCompletionsRequest,
   route: RouteDecision,
   context?: DownstreamRequestContext,
 ): Promise<DownstreamResponse> => {
-  const providerId = route.providerId || "default";
-  const provider = getProvider(providerId);
-  if (!provider) {
-    if (providerId === "default" && config.downstreamMockFallbackEnabled) {
-      return buildMockResponse(req, route);
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider) {
+      // Preserve legacy mock-fallback behavior only when primary "default"
+      // is unregistered AND we're on the first attempt with no fallbacks —
+      // otherwise the request intended a real provider and should error.
+      if (
+        i === 0 &&
+        chain.length === 1 &&
+        providerId === "default" &&
+        config.downstreamMockFallbackEnabled
+      ) {
+        return buildMockResponse(req, route);
+      }
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
     }
-    throw new DownstreamNotConfiguredError(
-      `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
-    );
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      return (await provider.call(req, route, context)) as DownstreamResponse;
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
   }
-  return provider.call(req, route, context) as Promise<DownstreamResponse>;
+  throw lastError ?? new DownstreamNotConfiguredError("no providers available");
 };
 
 // --- Streaming path ------------------------------------------------------
@@ -792,16 +877,46 @@ export const streamDownstream = async (
   res: express.Response,
   context?: DownstreamRequestContext,
 ): Promise<void> => {
-  const providerId = route.providerId || "default";
-  const provider = getProvider(providerId);
-  if (!provider) {
-    if (providerId === "default" && config.downstreamMockFallbackEnabled) {
-      emitDownstreamResponseAsSse(res, buildMockResponse(req, route));
-      return;
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider) {
+      if (
+        i === 0 &&
+        chain.length === 1 &&
+        providerId === "default" &&
+        config.downstreamMockFallbackEnabled
+      ) {
+        emitDownstreamResponseAsSse(res, buildMockResponse(req, route));
+        return;
+      }
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
     }
-    throw new DownstreamNotConfiguredError(
-      `provider '${providerId}' is not registered (no matching entry in PROVIDERS env or legacy DOWNSTREAM_*)`,
-    );
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      await provider.stream(req, route, res, context);
+      return;
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      // Once bytes have been written to the client we cannot failover — the
+      // adapter is responsible for emitting an in-band error chunk and
+      // ending the SSE stream. Rethrow so the app layer logs it.
+      if (res.headersSent) throw err;
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
   }
-  return provider.stream(req, route, res, context);
+  throw lastError ?? new DownstreamNotConfiguredError("no providers available");
 };
