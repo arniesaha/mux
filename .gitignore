@@ -1,3 +1,10 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
+.venv-litellm/
+.litellm.e2e.yaml
+.litellm.e2e.yaml.*
+run/
+linkedin-draft.md

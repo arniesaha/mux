@@ -80,10 +80,12 @@ Mux routes requests using configurable policy rules:
 
 | Request type | Resolved model |
 |---|---|
-| Lightweight / general chat | `claude-sonnet-4-6` |
-| Coding / debugging | `claude-sonnet-4-6` |
-| Complex reasoning / planning | `claude-opus-4-6` |
+| Short lightweight prompts (< 80 chars, no task cues) | `claude-haiku-4-5-20251001` |
+| Coding / debugging / execution cues | `claude-sonnet-4-6` |
+| Complex reasoning / planning / architecture cues | `claude-opus-4-6` |
 | `gpt-4o` (simple prompts) | downgraded to `gpt-4o-mini` |
+
+Routing for Max runtime requests is evaluated on the **last user message only** — system prompts and conversation history are ignored to prevent false escalation.
 
 Route decisions are logged with: `runtime`, `requestedModel`, `resolvedModel`, `routeReason`, `provider`, `backendTarget`.
 
