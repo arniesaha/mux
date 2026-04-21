@@ -1772,3 +1772,338 @@ describe("streamDownstream", () => {
     }
   });
 });
+
+// --- cross-provider failover (issue #45) ------------------------------------
+
+describe("callDownstream — failover", () => {
+  const failoverRoute: RouteDecision = {
+    requestedModel: "gpt-4o",
+    resolvedModel: "gpt-4o-mini",
+    routeReason: "heuristic:test+cost_weighted",
+    provider: "openai-compatible",
+    backendTarget: "http://a/v1",
+    providerId: "a",
+    fallbackProviderIds: ["b"],
+  };
+
+  const setupTwoProviders = () => {
+    const previousProviders = config.providers;
+    const previousAttempts = config.failoverMaxAttempts;
+    config.providers = [
+      {
+        id: "a",
+        kind: "openai-compatible",
+        baseUrl: "http://a/v1",
+        auth: { mode: "bearer", apiKey: "key-a" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.1, costOutputUsdPerMTok: 0.4 }],
+      },
+      {
+        id: "b",
+        kind: "openai-compatible",
+        baseUrl: "http://b/v1",
+        auth: { mode: "bearer", apiKey: "key-b" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.2, costOutputUsdPerMTok: 0.5 }],
+      },
+    ];
+    config.failoverMaxAttempts = 1;
+    __resetAnthropicClientForTests();
+    return () => {
+      config.providers = previousProviders;
+      config.failoverMaxAttempts = previousAttempts;
+      __resetAnthropicClientForTests();
+    };
+  };
+
+  const okJsonResponse = (model: string, content: string): Response =>
+    new Response(
+      JSON.stringify({
+        id: "chatcmpl-x",
+        object: "chat.completion",
+        created: 1,
+        model,
+        choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  it("retries on 5xx from primary and succeeds with fallback", async () => {
+    const restore = setupTwoProviders();
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith("http://a/")) {
+            return new Response(JSON.stringify({ error: { message: "boom" } }), {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.startsWith("http://b/")) {
+            return okJsonResponse("gpt-4o-mini", "from-b");
+          }
+          throw new Error(`unexpected url: ${url}`);
+        });
+
+      const result = await callDownstream(requestPayload, failoverRoute);
+      expect(result.choices[0]?.message.content).toBe("from-b");
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not retry on 4xx client error from primary", async () => {
+    const restore = setupTwoProviders();
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith("http://a/")) {
+            return new Response(JSON.stringify({ error: { message: "bad request" } }), {
+              status: 400,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          throw new Error(`unexpected url: ${url}`);
+        });
+
+      await expect(callDownstream(requestPayload, failoverRoute)).rejects.toBeInstanceOf(
+        DownstreamRequestError,
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("surfaces the last error when all providers fail", async () => {
+    const restore = setupTwoProviders();
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const status = url.startsWith("http://a/") ? 503 : 504;
+        return new Response(JSON.stringify({ error: { message: "down" } }), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      await expect(callDownstream(requestPayload, failoverRoute)).rejects.toSatisfy(
+        (err) => err instanceof DownstreamRequestError && err.status === 504,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("disables failover when FAILOVER_MAX_ATTEMPTS=0", async () => {
+    const restore = setupTwoProviders();
+    try {
+      config.failoverMaxAttempts = 0;
+      __resetAnthropicClientForTests();
+
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () =>
+          new Response(JSON.stringify({ error: { message: "boom" } }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+
+      await expect(callDownstream(requestPayload, failoverRoute)).rejects.toSatisfy(
+        (err) => err instanceof DownstreamRequestError && err.status === 503,
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("logs a mux.failover_hop event on hop", async () => {
+    const restore = setupTwoProviders();
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("http://a/")) {
+          return new Response("x", { status: 503 });
+        }
+        return okJsonResponse("gpt-4o-mini", "hi");
+      });
+      const warnSpy = vi.spyOn(downstreamLogger, "warn");
+
+      await callDownstream(requestPayload, failoverRoute);
+
+      const hopLog = warnSpy.mock.calls
+        .map((c) => c[0] as Record<string, unknown>)
+        .find((c) => c.event === "mux.failover_hop");
+      expect(hopLog).toBeDefined();
+      expect(hopLog?.from).toBe("a");
+      expect(hopLog?.to).toBe("b");
+      expect(hopLog?.attempt).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("streamDownstream — failover", () => {
+  const streamRoute: RouteDecision = {
+    requestedModel: "gpt-4o",
+    resolvedModel: "gpt-4o-mini",
+    routeReason: "heuristic:test+cost_weighted",
+    provider: "openai-compatible",
+    backendTarget: "http://a/v1",
+    providerId: "a",
+    fallbackProviderIds: ["b"],
+  };
+
+  const setupTwoProviders = () => {
+    const previousProviders = config.providers;
+    const previousAttempts = config.failoverMaxAttempts;
+    config.providers = [
+      {
+        id: "a",
+        kind: "openai-compatible",
+        baseUrl: "http://a/v1",
+        auth: { mode: "bearer", apiKey: "key-a" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.1, costOutputUsdPerMTok: 0.4 }],
+      },
+      {
+        id: "b",
+        kind: "openai-compatible",
+        baseUrl: "http://b/v1",
+        auth: { mode: "bearer", apiKey: "key-b" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.2, costOutputUsdPerMTok: 0.5 }],
+      },
+    ];
+    config.failoverMaxAttempts = 1;
+    __resetAnthropicClientForTests();
+    return () => {
+      config.providers = previousProviders;
+      config.failoverMaxAttempts = previousAttempts;
+      __resetAnthropicClientForTests();
+    };
+  };
+
+  const makeStreamRes = () => {
+    const res: any = {
+      statusCode: 0,
+      headersSent: false,
+      headers: {} as Record<string, string>,
+      writes: [] as string[],
+      ended: false,
+      _listeners: {} as Record<string, Array<() => void>>,
+      status(code: number) { res.statusCode = code; return res; },
+      setHeader(k: string, v: string) { res.headers[k] = v; },
+      getHeader(k: string) { return res.headers[k]; },
+      write(chunk: string) { res.headersSent = true; res.writes.push(chunk); return true; },
+      end() { res.ended = true; },
+      once(event: string, cb: () => void) { (res._listeners[event] ||= []).push(cb); },
+      off(event: string, cb: () => void) {
+        const list = res._listeners[event];
+        if (!list) return;
+        const i = list.indexOf(cb);
+        if (i >= 0) list.splice(i, 1);
+      },
+      emit(event: string) { for (const cb of res._listeners[event] ?? []) cb(); },
+    };
+    return res;
+  };
+
+  const sseOk = (content: string): Response => {
+    const encoder = new TextEncoder();
+    const frames = [
+      `data: ${JSON.stringify({
+        id: "c", object: "chat.completion.chunk", created: 1, model: "gpt-4o-mini",
+        choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: "c", object: "chat.completion.chunk", created: 1, model: "gpt-4o-mini",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ];
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const f of frames) controller.enqueue(encoder.encode(f));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+
+  it("retries pre-stream on 503 and streams from fallback", async () => {
+    const restore = setupTwoProviders();
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("http://a/")) {
+          return new Response(JSON.stringify({ error: { message: "boom" } }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return sseOk("hi from b");
+      });
+
+      const res = makeStreamRes();
+      await streamDownstream(
+        { ...requestPayload, stream: true },
+        streamRoute,
+        res as unknown as import("express").Response,
+      );
+
+      const joined = res.writes.join("");
+      expect(joined).toContain("hi from b");
+      expect(joined).toContain("[DONE]");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not failover on a mid-stream non-retryable error from the primary", async () => {
+    const restore = setupTwoProviders();
+    try {
+      // Primary opens a 200 stream but the body errors mid-pull with a plain
+      // Error (not a retryable class). Dispatcher must rethrow without calling
+      // provider B, even if res.headersSent has not yet flipped — because the
+      // error itself is non-retryable.
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith("http://a/")) {
+            const stream = new ReadableStream({
+              pull(controller) {
+                controller.error(new Error("mid-stream boom"));
+              },
+            });
+            return new Response(stream, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          }
+          throw new Error("provider b must not be called");
+        });
+
+      const res = makeStreamRes();
+      await expect(
+        streamDownstream(
+          { ...requestPayload, stream: true },
+          streamRoute,
+          res as unknown as import("express").Response,
+        ),
+      ).rejects.toThrow(/mid-stream boom/);
+
+      // Provider A was called; provider B was NOT.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[0]?.[0]).toMatch(/^http:\/\/a\//);
+    } finally {
+      restore();
+    }
+  });
+});
