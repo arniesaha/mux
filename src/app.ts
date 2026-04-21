@@ -45,6 +45,7 @@ export const createApp = () => {
       const runtime = body.runtime || req.header("x-runtime") || "unknown";
       const routedBody: ChatCompletionsRequest = { ...body, runtime };
       const route = resolveRoute(routedBody);
+      const callerAgentId = req.header("x-agentweave-agent-id");
 
       // Extract a short prompt preview from the last user message for tracing
       const lastUserMsg = [...body.messages].reverse().find(m => m.role === "user");
@@ -60,8 +61,10 @@ export const createApp = () => {
         "prov.route.reason": route.routeReason,
         "prov.route.runtime": runtime,
         "prov.route.provider_id": route.providerId,
+        "prov.llm.model": route.resolvedModel,
         "prov.llm.prompt_preview": promptPreview,
         "prov.route.message_count": body.messages.length,
+        ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
       });
 
       logger.info({

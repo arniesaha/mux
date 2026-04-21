@@ -5,6 +5,7 @@ import type {
 import type express from "express";
 
 import { setSpanAttrs, withLlmSpan } from "../tracing.js";
+import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
 import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
 import {
   anthropicStopReasonToOpenAI,
@@ -195,11 +196,20 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
         const blockTypes = response.content.map((b) => b.type);
         const empty = toolUseBlocks.length === 0 && (textBlocks.length === 0 || joinedTextLength === 0);
 
+        const costUsd = computeCostUsd(
+          cfg,
+          route.resolvedModel,
+          response.usage.input_tokens,
+          response.usage.output_tokens,
+        );
+        const callerAgentId = resolveCallerAgentId(context);
         setSpanAttrs({
           "prov.llm.prompt_tokens": response.usage.input_tokens,
           "prov.llm.completion_tokens": response.usage.output_tokens,
           "prov.llm.total_tokens": response.usage.input_tokens + response.usage.output_tokens,
           "prov.llm.stop_reason": anthropicStopReasonToOpenAI(response.stop_reason) ?? "unknown",
+          "cost.usd": costUsd,
+          ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
         });
 
         const respEvent = {
@@ -267,11 +277,20 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
         },
       );
 
+      const costUsd = computeCostUsd(
+        cfg,
+        route.resolvedModel,
+        result.inputTokens,
+        result.outputTokens,
+      );
+      const callerAgentId = resolveCallerAgentId(context);
       setSpanAttrs({
         "prov.llm.prompt_tokens": result.inputTokens,
         "prov.llm.completion_tokens": result.outputTokens,
         "prov.llm.total_tokens": result.inputTokens + result.outputTokens,
         "prov.llm.stop_reason": anthropicStopReasonToOpenAI(result.stopReason) ?? "unknown",
+        "cost.usd": costUsd,
+        ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
       });
     });
   };

@@ -1,6 +1,7 @@
 import type express from "express";
 
 import { setSpanAttrs, withLlmSpan } from "../tracing.js";
+import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
 import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
 import {
   buildMockResponse,
@@ -120,11 +121,17 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
         const result = (await response.json()) as DownstreamResponse;
         const latencyMs = Date.now() - startedAt;
 
+        const promptTokens = result.usage?.prompt_tokens ?? 0;
+        const completionTokens = result.usage?.completion_tokens ?? 0;
+        const costUsd = computeCostUsd(cfg, route.resolvedModel, promptTokens, completionTokens);
+        const callerAgentId = resolveCallerAgentId(context);
         setSpanAttrs({
-          "prov.llm.prompt_tokens": result.usage?.prompt_tokens ?? 0,
-          "prov.llm.completion_tokens": result.usage?.completion_tokens ?? 0,
+          "prov.llm.prompt_tokens": promptTokens,
+          "prov.llm.completion_tokens": completionTokens,
           "prov.llm.total_tokens": result.usage?.total_tokens ?? 0,
           "prov.llm.stop_reason": result.choices?.[0]?.finish_reason ?? "unknown",
+          "cost.usd": costUsd,
+          ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
         });
 
         downstreamLogger.info({
