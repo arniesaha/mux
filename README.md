@@ -19,7 +19,7 @@ Mux is the control point for that problem.
 ## What Mux provides
 
 - an OpenAI-compatible `/v1/chat/completions` endpoint
-- a lightweight policy engine with simple routing heuristics
+- a configurable policy-based routing rules
 - support for routing across models and providers
 - fallback and escalation handling
 - structured routing metadata for observability
@@ -72,7 +72,7 @@ DOWNSTREAM_TIMEOUT_MS=30000
 
 ## Routing behavior
 
-Mux routes requests using simple keyword heuristics:
+Mux routes requests using configurable policy rules:
 
 | Request type | Resolved model |
 |---|---|
