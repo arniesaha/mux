@@ -26,13 +26,17 @@ Mux is the control point for that problem.
 
 ## Architecture
 
-```
-Client runtime (OpenClaw / pi-mono) → Mux policy layer → downstream provider → response
-                                            ↓
-                                    structured routing log
-                                            ↓
-                                       AgentWeave
-```
+Mux sits between heterogeneous agent runtimes and heterogeneous model backends. One OpenAI-compatible endpoint, a policy layer, and a downstream dispatcher selected via `DOWNSTREAM_MODE`.
+
+![Mux architecture](./docs/diagrams/architecture.png)
+
+Inside `src/downstream.ts`, Mux translates OpenAI chat-completion shape to and from the Anthropic Messages API — content blocks (text + image), tools, and stop reasons all map across:
+
+![Shape translation](./docs/diagrams/shape-translation.png)
+
+End-to-end, a single streaming request flows through validation, routing, the Anthropic SDK, and an event mapper that rewrites Anthropic stream events as OpenAI SSE chunks on the way back to the client:
+
+![Turn lifecycle](./docs/diagrams/sequence.png)
 
 ## Getting started
 
