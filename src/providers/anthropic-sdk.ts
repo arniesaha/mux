@@ -4,6 +4,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages/messages";
 import type express from "express";
 
+import { config } from "../config.js";
 import { setSpanAttrs, withLlmSpan } from "../tracing.js";
 import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
 import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
@@ -112,21 +113,37 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
     streamed: boolean,
   ): { client: Anthropic; params: Record<string, unknown> } => {
     const client = getClient();
-    const { system, messages } = toAnthropicInput(req);
+    const cacheControl = config.anthropicPromptCacheEnabled;
+    const { system, messages } = toAnthropicInput(req, { cacheControl });
     const isOauth = cfg.auth.mode === "anthropic-oauth";
-    const systemBlocks = isOauth
-      ? [
-          { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          ...(system ? [{ type: "text" as const, text: system }] : []),
-        ]
-      : system;
+
+    // Normalize to the shape Anthropic's SDK accepts: string | block[].
+    // When cacheControl is on, toAnthropicInput already returns blocks. The
+    // oauth branch must always prepend the Claude Code identity prefix, and
+    // merge with whatever toAnthropicInput returned.
+    let systemBlocks: string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> | undefined;
+    if (isOauth) {
+      const prefix = {
+        type: "text" as const,
+        text: "You are Claude Code, Anthropic's official CLI for Claude.",
+      };
+      if (Array.isArray(system)) {
+        systemBlocks = [prefix, ...system];
+      } else if (typeof system === "string" && system.length > 0) {
+        systemBlocks = [prefix, { type: "text", text: system }];
+      } else {
+        systemBlocks = [prefix];
+      }
+    } else {
+      systemBlocks = system;
+    }
 
     const maxTokens = req.max_tokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
     const systemLength = Array.isArray(systemBlocks)
       ? systemBlocks.reduce((sum, b) => sum + b.text.length, 0)
       : (systemBlocks?.length ?? 0);
 
-    const anthropicTools = translateToolsToAnthropic(req.tools);
+    const anthropicTools = translateToolsToAnthropic(req.tools, { cacheControl });
     const anthropicToolChoice = translateToolChoiceToAnthropic(req.tool_choice);
 
     downstreamLogger.info({

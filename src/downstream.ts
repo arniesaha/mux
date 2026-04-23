@@ -47,8 +47,17 @@ export type DownstreamResponse = {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    prompt_tokens_details?: {
+      cached_tokens: number;
+    };
   };
 };
+
+// Anthropic ephemeral prompt-cache breakpoint. Attaching this to a content
+// block tells Anthropic to cache the prefix up to and including that block
+// for ~5 minutes; subsequent requests with the same prefix read from cache
+// at ~90% discount. See issue #49.
+export type AnthropicCacheControl = { type: "ephemeral" };
 
 export class DownstreamNotConfiguredError extends Error {
   constructor(message = "Downstream is not configured") {
@@ -325,8 +334,26 @@ const openAIToolCallToToolUse = (call: OpenAIToolCall): AnthropicToolUseBlock =>
   };
 };
 
-export const toAnthropicInput = (req: ChatCompletionsRequest): {
-  system?: string;
+export type AnthropicSystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: AnthropicCacheControl;
+};
+
+export type ToAnthropicInputOptions = {
+  // When true, inject ephemeral cache_control breakpoints at:
+  //   1. the (single) system text block, and
+  //   2. the last content block of the last message — provided history has
+  //      at least 2 messages. Single-message history skips (2) because
+  //      there's no prior turn whose prefix we'd be re-using.
+  cacheControl?: boolean;
+};
+
+export const toAnthropicInput = (
+  req: ChatCompletionsRequest,
+  opts: ToAnthropicInputOptions = {},
+): {
+  system?: string | AnthropicSystemBlock[];
   messages: AnthropicInputMessage[];
 } => {
   const system = req.messages
@@ -383,14 +410,53 @@ export const toAnthropicInput = (req: ChatCompletionsRequest): {
     messages.push({ role, content: blocks });
   }
 
+  // Cache-control injection. Kept out of the hot loop so the non-cache path
+  // (opts.cacheControl !== true) is a no-op.
+  if (opts.cacheControl) {
+    // Breakpoint on last block of last message — caches the full history
+    // prefix so multi-turn loops hit cache from turn 2 onwards. Skip when
+    // history is a single turn: nothing to reuse yet.
+    if (messages.length >= 2) {
+      const last = messages[messages.length - 1]!;
+      const lastBlock = last.content[last.content.length - 1];
+      if (lastBlock) {
+        (lastBlock as { cache_control?: AnthropicCacheControl }).cache_control = {
+          type: "ephemeral",
+        };
+      }
+    }
+
+    if (system) {
+      return {
+        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+        messages,
+      };
+    }
+    return { system: undefined, messages };
+  }
+
   return { system: system || undefined, messages };
+};
+
+export type AnthropicToolDef = {
+  name: string;
+  description?: string;
+  input_schema: Record<string, unknown>;
+  cache_control?: AnthropicCacheControl;
+};
+
+export type TranslateToolsOptions = {
+  // When true, attach ephemeral cache_control to the LAST translated tool —
+  // Anthropic caches the entire tools block up to the last marker. See #49.
+  cacheControl?: boolean;
 };
 
 export const translateToolsToAnthropic = (
   tools: OpenAIToolDef[] | undefined,
-): Array<{ name: string; description?: string; input_schema: Record<string, unknown> }> | undefined => {
+  opts: TranslateToolsOptions = {},
+): AnthropicToolDef[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
-  const translated = tools
+  const translated: AnthropicToolDef[] = tools
     .filter(
       (t): t is OpenAIToolDef =>
         !!t && t.type === "function" && !!t.function && typeof t.function.name === "string",
@@ -401,7 +467,7 @@ export const translateToolsToAnthropic = (
         params && typeof params === "object" && !Array.isArray(params)
           ? (params as Record<string, unknown>)
           : { type: "object", properties: {} };
-      const out: { name: string; description?: string; input_schema: Record<string, unknown> } = {
+      const out: AnthropicToolDef = {
         name: t.function.name,
         input_schema,
       };
@@ -410,7 +476,11 @@ export const translateToolsToAnthropic = (
       }
       return out;
     });
-  return translated.length > 0 ? translated : undefined;
+  if (translated.length === 0) return undefined;
+  if (opts.cacheControl) {
+    translated[translated.length - 1]!.cache_control = { type: "ephemeral" };
+  }
+  return translated;
 };
 
 export const translateToolChoiceToAnthropic = (
@@ -508,6 +578,31 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
 
   const inputTokens = response.usage.input_tokens;
   const outputTokens = response.usage.output_tokens;
+  // Anthropic reports cached tokens in separate buckets outside input_tokens.
+  // For an OpenAI-shaped client to see the true billable prompt size, we roll
+  // them back into prompt_tokens and expose the cache-hit portion via the
+  // canonical prompt_tokens_details.cached_tokens field. See #49.
+  const rawUsage = response.usage as {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+  };
+  const cacheCreation = rawUsage.cache_creation_input_tokens ?? 0;
+  const cacheRead = rawUsage.cache_read_input_tokens ?? 0;
+  const hasCacheFields =
+    rawUsage.cache_creation_input_tokens != null ||
+    rawUsage.cache_read_input_tokens != null;
+
+  const promptTokens = inputTokens + cacheCreation + cacheRead;
+  const usage: NonNullable<DownstreamResponse["usage"]> = {
+    prompt_tokens: promptTokens,
+    completion_tokens: outputTokens,
+    total_tokens: promptTokens + outputTokens,
+  };
+  if (hasCacheFields) {
+    usage.prompt_tokens_details = { cached_tokens: cacheRead };
+  }
 
   return {
     id: response.id,
@@ -525,11 +620,7 @@ export const toOpenAIResponse = (response: Message, model: string): DownstreamRe
         finish_reason: anthropicStopReasonToOpenAI(response.stop_reason),
       },
     ],
-    usage: {
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + outputTokens,
-    },
+    usage,
   };
 };
 

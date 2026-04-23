@@ -116,6 +116,43 @@ curl -s http://localhost:8787/v1/chat/completions \
 | `ANTHROPIC_OAUTH_TOKEN` | — | OAuth token (preferred for anthropic-sdk) |
 | `ANTHROPIC_API_KEY` | — | API key fallback for anthropic-sdk |
 | `ANTHROPIC_BASE_URL` | — | Override Anthropic API URL (supports proxies) |
+| `MUX_ANTHROPIC_PROMPT_CACHE` | `true` | Inject Anthropic ephemeral `cache_control` breakpoints on the translated request (system, tools, history) |
+
+## Prompt caching (Anthropic)
+
+When the downstream is Anthropic, Mux transparently injects ephemeral
+`cache_control` breakpoints on the translated request so multi-turn agents
+get a 90% discount on re-used input tokens (5-minute TTL).
+
+**What gets cached**
+- the translated system prompt (one breakpoint on the single text block),
+- the full tools block (breakpoint on the last tool),
+- the conversation history (breakpoint on the last content block of the
+  last message; skipped when there's only one turn).
+
+**Reading cache stats.** Anthropic's `cache_read_input_tokens` is surfaced
+on responses as `usage.prompt_tokens_details.cached_tokens`, and both
+cache-read and cache-creation tokens are rolled into `usage.prompt_tokens`
+so billable-prompt size reflects the true transcript:
+
+```json
+{
+  "usage": {
+    "prompt_tokens": 5400,
+    "completion_tokens": 20,
+    "total_tokens": 5420,
+    "prompt_tokens_details": { "cached_tokens": 5000 }
+  }
+}
+```
+
+**Cost model.** Anthropic charges a 25% surcharge on cache *writes* and a
+90% discount on cache *reads*, with a 5-minute TTL. For a client that
+re-uses the same system + tools across turns, turn 1 pays the write
+surcharge and turns 2+ hit cache — net cost drops sharply within a single
+session.
+
+**Opt out.** Set `MUX_ANTHROPIC_PROMPT_CACHE=false` to disable.
 
 ## Running tests
 

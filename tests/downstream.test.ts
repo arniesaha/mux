@@ -1035,11 +1035,13 @@ describe("callDownstream — tools forwarding to Anthropic SDK", () => {
     );
 
     const body = JSON.parse(String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body));
+    // Last (here: only) tool carries ephemeral cache_control by default — see #49.
     expect(body.tools).toEqual([
       {
         name: "gpu_status",
         description: "Report GPU state",
         input_schema: { type: "object", properties: {} },
+        cache_control: { type: "ephemeral" },
       },
     ]);
     expect(body.tool_choice).toEqual({ type: "auto" });
@@ -2105,5 +2107,219 @@ describe("streamDownstream — failover", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("prompt caching (cache_control injection)", () => {
+  const EPH = { type: "ephemeral" } as const;
+
+  it("returns system as an ephemeral-cached text block array when cacheControl enabled", () => {
+    const { system } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "system", content: "you are terse" },
+          { role: "user", content: "hi" },
+        ],
+      },
+      { cacheControl: true },
+    );
+
+    expect(Array.isArray(system)).toBe(true);
+    expect(system).toEqual([
+      { type: "text", text: "you are terse", cache_control: EPH },
+    ]);
+  });
+
+  it("returns system as a plain string when cacheControl disabled", () => {
+    const { system } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "system", content: "you are terse" },
+          { role: "user", content: "hi" },
+        ],
+      },
+      { cacheControl: false },
+    );
+
+    expect(system).toBe("you are terse");
+  });
+
+  it("omits system entirely when there is no system text, cacheControl enabled", () => {
+    const { system } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      { cacheControl: true },
+    );
+
+    expect(system).toBeUndefined();
+  });
+
+  it("attaches cache_control to the last content block of the last message when history has >=2 messages", () => {
+    const { messages } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: "q1" },
+          { role: "assistant", content: "a1" },
+          { role: "user", content: "q2" },
+        ],
+      },
+      { cacheControl: true },
+    );
+
+    expect(messages).toHaveLength(3);
+    const last = messages[messages.length - 1]!;
+    const lastBlock = last.content[last.content.length - 1]! as {
+      type: string;
+      cache_control?: typeof EPH;
+    };
+    expect(lastBlock.cache_control).toEqual(EPH);
+
+    // Earlier messages are NOT marked.
+    for (let i = 0; i < messages.length - 1; i++) {
+      for (const b of messages[i]!.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+  });
+
+  it("skips the history breakpoint when there is a single message", () => {
+    const { messages } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "only-one" }],
+      },
+      { cacheControl: true },
+    );
+
+    expect(messages).toHaveLength(1);
+    const only = messages[0]!;
+    const block = only.content[only.content.length - 1]! as { cache_control?: unknown };
+    expect(block.cache_control).toBeUndefined();
+  });
+
+  it("does not inject cache_control on messages when cacheControl disabled", () => {
+    const { messages } = toAnthropicInput(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: "q1" },
+          { role: "assistant", content: "a1" },
+          { role: "user", content: "q2" },
+        ],
+      },
+      { cacheControl: false },
+    );
+
+    for (const m of messages) {
+      for (const b of m.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+  });
+
+  it("marks only the last tool with cache_control when cacheControl enabled", () => {
+    const tools: OpenAIToolDef[] = [
+      { type: "function", function: { name: "a", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "b", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "c", parameters: { type: "object", properties: {} } } },
+    ];
+    const result = translateToolsToAnthropic(tools, { cacheControl: true });
+    expect(result).toHaveLength(3);
+    expect((result![0] as { cache_control?: unknown }).cache_control).toBeUndefined();
+    expect((result![1] as { cache_control?: unknown }).cache_control).toBeUndefined();
+    expect((result![2] as { cache_control?: unknown }).cache_control).toEqual(EPH);
+  });
+
+  it("leaves tools untouched when cacheControl disabled", () => {
+    const tools: OpenAIToolDef[] = [
+      { type: "function", function: { name: "a", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "b", parameters: { type: "object", properties: {} } } },
+    ];
+    const result = translateToolsToAnthropic(tools, { cacheControl: false });
+    for (const t of result!) {
+      expect((t as { cache_control?: unknown }).cache_control).toBeUndefined();
+    }
+  });
+
+  it("preserves the existing default behaviour when called without options", () => {
+    // Back-compat: existing callers that omit options see no cache_control.
+    const { system, messages } = toAnthropicInput({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "system", content: "s" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    });
+    expect(system).toBe("s");
+    for (const m of messages) {
+      for (const b of m.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+
+    const tools = translateToolsToAnthropic([
+      { type: "function", function: { name: "a", parameters: { type: "object", properties: {} } } },
+    ]);
+    expect((tools![0] as { cache_control?: unknown }).cache_control).toBeUndefined();
+  });
+});
+
+describe("toOpenAIResponse — cache usage surfacing", () => {
+  it("maps cache_read_input_tokens into prompt_tokens_details.cached_tokens and rolls cache tokens into prompt_tokens", () => {
+    const response = toOpenAIResponse(
+      {
+        id: "msg_cache",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_creation_input_tokens: 300,
+          cache_read_input_tokens: 5000,
+        },
+      } as unknown as Parameters<typeof toOpenAIResponse>[0],
+      "claude-sonnet-4-6",
+    );
+
+    expect(response.usage).toBeDefined();
+    // input (100) + cache_read (5000) + cache_creation (300) = 5400
+    expect(response.usage!.prompt_tokens).toBe(5400);
+    expect(response.usage!.completion_tokens).toBe(20);
+    expect(response.usage!.total_tokens).toBe(5420);
+    expect(
+      (response.usage as { prompt_tokens_details?: { cached_tokens?: number } })
+        .prompt_tokens_details?.cached_tokens,
+    ).toBe(5000);
+  });
+
+  it("omits prompt_tokens_details when no cache fields are present", () => {
+    const response = toOpenAIResponse(
+      {
+        id: "msg_nocache",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 3 },
+      } as unknown as Parameters<typeof toOpenAIResponse>[0],
+      "claude-sonnet-4-6",
+    );
+
+    expect(response.usage!.prompt_tokens).toBe(10);
+    expect(
+      (response.usage as { prompt_tokens_details?: unknown }).prompt_tokens_details,
+    ).toBeUndefined();
   });
 });
