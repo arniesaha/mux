@@ -142,4 +142,12 @@ export const config = {
   agentweaveAgentId: process.env.AGENTWEAVE_AGENT_ID || "mux-router",
   providers: parseProviders(process.env.PROVIDERS),
   failoverMaxAttempts: parseNonNegativeInt(process.env.FAILOVER_MAX_ATTEMPTS, 1),
+  // Inject Anthropic ephemeral prompt-cache breakpoints in the OpenAI →
+  // Anthropic translator (system prompt, tools, history). On by default —
+  // correctly-formed requests only benefit. Opt out with
+  // MUX_ANTHROPIC_PROMPT_CACHE=false if a downstream edge case surfaces.
+  anthropicPromptCacheEnabled: parseBoolean(
+    process.env.MUX_ANTHROPIC_PROMPT_CACHE,
+    true,
+  ),
 };
