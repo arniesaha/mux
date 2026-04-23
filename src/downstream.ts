@@ -723,6 +723,10 @@ type ToolCallAccum = {
 export type StreamResult = {
   inputTokens: number;
   outputTokens: number;
+  // Ephemeral-cache token buckets Anthropic reports alongside input_tokens.
+  // Both default to 0 when the model/request doesn't carry cache fields.
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   stopReason: string | null;
 };
 
@@ -768,6 +772,8 @@ export const streamAnthropicToOpenAI = async (
   let finalStopReason: string | null = null;
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
   let phase: string = "start";
   let aborted = false;
   let clientClosed = false;
@@ -798,10 +804,29 @@ export const streamAnthropicToOpenAI = async (
       phase = event.type;
       switch (event.type) {
         case "message_start": {
-          // role chunk already emitted; capture input token count from usage
-          const msg = (event as { message?: { usage?: { input_tokens?: number } } }).message;
-          if (msg?.usage && typeof msg.usage.input_tokens === "number") {
-            inputTokens = msg.usage.input_tokens;
+          // role chunk already emitted; capture usage counters. Anthropic
+          // splits billable input into input_tokens (fresh) plus two cache
+          // buckets — we track all three so the final usage chunk can roll
+          // them together for OpenAI parity (see #52).
+          const msg = (event as {
+            message?: {
+              usage?: {
+                input_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              };
+            };
+          }).message;
+          if (msg?.usage) {
+            if (typeof msg.usage.input_tokens === "number") {
+              inputTokens = msg.usage.input_tokens;
+            }
+            if (typeof msg.usage.cache_read_input_tokens === "number") {
+              cacheReadTokens = msg.usage.cache_read_input_tokens;
+            }
+            if (typeof msg.usage.cache_creation_input_tokens === "number") {
+              cacheCreationTokens = msg.usage.cache_creation_input_tokens;
+            }
           }
           break;
         }
@@ -863,10 +888,26 @@ export const streamAnthropicToOpenAI = async (
           if (d && typeof d.stop_reason === "string") {
             finalStopReason = d.stop_reason;
           }
-          // Anthropic output_tokens is cumulative — always take the latest value
-          const mdUsage = (event as { usage?: { output_tokens?: number } }).usage;
-          if (mdUsage && typeof mdUsage.output_tokens === "number") {
-            outputTokens = mdUsage.output_tokens;
+          // Anthropic output_tokens is cumulative — always take the latest value.
+          // Some models also update cache_* buckets here; apply the same
+          // last-value-wins rule so telemetry matches what Anthropic billed.
+          const mdUsage = (event as {
+            usage?: {
+              output_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation_input_tokens?: number;
+            };
+          }).usage;
+          if (mdUsage) {
+            if (typeof mdUsage.output_tokens === "number") {
+              outputTokens = mdUsage.output_tokens;
+            }
+            if (typeof mdUsage.cache_read_input_tokens === "number") {
+              cacheReadTokens = mdUsage.cache_read_input_tokens;
+            }
+            if (typeof mdUsage.cache_creation_input_tokens === "number") {
+              cacheCreationTokens = mdUsage.cache_creation_input_tokens;
+            }
           }
           break;
         }
@@ -887,6 +928,8 @@ export const streamAnthropicToOpenAI = async (
       stopSequence: null,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
       blockCount: (textLength > 0 ? 1 : 0) + toolUseBlockCount,
       blockTypes: [
         ...(textLength > 0 ? ["text"] : []),
@@ -907,6 +950,33 @@ export const streamAnthropicToOpenAI = async (
 
     if (!clientClosed) {
       writeChunk({}, anthropicStopReasonToOpenAI(finalStopReason));
+      // OpenAI include_usage convention: trailing chunk with choices: [] + usage.
+      // Mirrors toOpenAIResponse — cache tokens get rolled into prompt_tokens
+      // so billable prompt size is symmetric across streaming and non-streaming.
+      const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
+      const usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        prompt_tokens_details?: { cached_tokens: number };
+      } = {
+        prompt_tokens: promptTokens,
+        completion_tokens: outputTokens,
+        total_tokens: promptTokens + outputTokens,
+      };
+      if (cacheReadTokens > 0 || cacheCreationTokens > 0) {
+        usage.prompt_tokens_details = { cached_tokens: cacheReadTokens };
+      }
+      res.write(
+        `data: ${JSON.stringify({
+          id: streamId,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [],
+          usage,
+        })}\n\n`,
+      );
       res.write("data: [DONE]\n\n");
       res.end();
     }
@@ -928,7 +998,13 @@ export const streamAnthropicToOpenAI = async (
     res.off("close", onClose);
   }
 
-  return { inputTokens, outputTokens, stopReason: finalStopReason };
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    stopReason: finalStopReason,
+  };
 };
 
 export const emitDownstreamResponseAsSse = (res: express.Response, completion: DownstreamResponse): void => {

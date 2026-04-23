@@ -220,12 +220,22 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
           response.usage.output_tokens,
         );
         const callerAgentId = resolveCallerAgentId(context);
+        const respUsage = response.usage as {
+          input_tokens: number;
+          output_tokens: number;
+          cache_read_input_tokens?: number | null;
+          cache_creation_input_tokens?: number | null;
+        };
+        const cacheRead = respUsage.cache_read_input_tokens ?? 0;
+        const cacheCreation = respUsage.cache_creation_input_tokens ?? 0;
         setSpanAttrs({
           "prov.llm.prompt_tokens": response.usage.input_tokens,
           "prov.llm.completion_tokens": response.usage.output_tokens,
           "prov.llm.total_tokens": response.usage.input_tokens + response.usage.output_tokens,
           "prov.llm.stop_reason": anthropicStopReasonToOpenAI(response.stop_reason) ?? "unknown",
           "cost.usd": costUsd,
+          ...(cacheRead > 0 ? { "prov.llm.cache_read_input_tokens": cacheRead } : {}),
+          ...(cacheCreation > 0 ? { "prov.llm.cache_creation_input_tokens": cacheCreation } : {}),
           ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
         });
 
@@ -307,6 +317,12 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
         "prov.llm.total_tokens": result.inputTokens + result.outputTokens,
         "prov.llm.stop_reason": anthropicStopReasonToOpenAI(result.stopReason) ?? "unknown",
         "cost.usd": costUsd,
+        ...(result.cacheReadTokens > 0
+          ? { "prov.llm.cache_read_input_tokens": result.cacheReadTokens }
+          : {}),
+        ...(result.cacheCreationTokens > 0
+          ? { "prov.llm.cache_creation_input_tokens": result.cacheCreationTokens }
+          : {}),
         ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
       });
     });
