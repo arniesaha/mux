@@ -1216,8 +1216,8 @@ describe("streamAnthropicToOpenAI", () => {
     const frames = parseSseFrames(res.writes);
     expect(frames[frames.length - 1]).toBe("[DONE]");
     const chunks = frames.filter((f): f is Record<string, unknown> => f !== "[DONE]");
-    // 1: role, 2: "hel", 3: "lo", 4: final finish_reason
-    expect(chunks).toHaveLength(4);
+    // 1: role, 2: "hel", 3: "lo", 4: finish_reason, 5: usage
+    expect(chunks).toHaveLength(5);
 
     const firstDelta = (chunks[0] as any).choices[0].delta;
     expect(firstDelta).toEqual({ role: "assistant" });
@@ -1226,9 +1226,14 @@ describe("streamAnthropicToOpenAI", () => {
     expect((chunks[1] as any).choices[0].delta).toEqual({ content: "hel" });
     expect((chunks[2] as any).choices[0].delta).toEqual({ content: "lo" });
 
-    const last = chunks[3] as any;
-    expect(last.choices[0].delta).toEqual({});
-    expect(last.choices[0].finish_reason).toBe("stop");
+    const finish = chunks[3] as any;
+    expect(finish.choices[0].delta).toEqual({});
+    expect(finish.choices[0].finish_reason).toBe("stop");
+
+    // Final chunk is the OpenAI include_usage shape: choices: [] + usage.
+    const usageChunk = chunks[4] as any;
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toBeDefined();
     expect(res.ended).toBe(true);
   });
 
@@ -1266,8 +1271,8 @@ describe("streamAnthropicToOpenAI", () => {
     const chunks = parseSseFrames(res.writes).filter(
       (f): f is Record<string, unknown> => f !== "[DONE]",
     );
-    // Role chunk + tool_use start + 2 argument fragments + final.
-    expect(chunks).toHaveLength(5);
+    // Role chunk + tool_use start + 2 argument fragments + finish_reason + usage.
+    expect(chunks).toHaveLength(6);
 
     const toolStart = (chunks[1] as any).choices[0].delta.tool_calls;
     expect(toolStart).toEqual([
@@ -1286,8 +1291,11 @@ describe("streamAnthropicToOpenAI", () => {
     const frag2 = (chunks[3] as any).choices[0].delta.tool_calls;
     expect(frag2).toEqual([{ index: 0, function: { arguments: 'tc/hosts"}' } }]);
 
-    // Final chunk uses tool_use → tool_calls mapping.
+    // finish_reason chunk maps tool_use → tool_calls.
     expect((chunks[4] as any).choices[0].finish_reason).toBe("tool_calls");
+    // Trailing usage chunk (choices: []).
+    expect((chunks[5] as any).choices).toEqual([]);
+    expect((chunks[5] as any).usage).toBeDefined();
   });
 
   it("writes a terminal [stream error:] chunk when the event source throws", async () => {
@@ -1398,6 +1406,180 @@ describe("streamAnthropicToOpenAI", () => {
     // Must be the last seen value (25), NOT a sum (3 + 7 + 25 = 35).
     expect(respEvent?.outputTokens).toBe(25);
   });
+
+  it("emits a final usage chunk with prompt_tokens_details.cached_tokens when Anthropic reports cache hits", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_c",
+          usage: {
+            input_tokens: 12,
+            output_tokens: 0,
+            cache_read_input_tokens: 5000,
+            cache_creation_input_tokens: 300,
+          },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 7 },
+      },
+      { type: "message_stop" },
+    ];
+
+    const result = await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const chunks = parseSseFrames(res.writes).filter(
+      (f): f is Record<string, unknown> => f !== "[DONE]",
+    );
+    const usageChunk = chunks[chunks.length - 1] as any;
+    expect(usageChunk.choices).toEqual([]);
+    // Rolls cache tokens into prompt_tokens to match non-streaming toOpenAIResponse.
+    // input(12) + cache_read(5000) + cache_creation(300) = 5312
+    expect(usageChunk.usage.prompt_tokens).toBe(5312);
+    expect(usageChunk.usage.completion_tokens).toBe(7);
+    expect(usageChunk.usage.total_tokens).toBe(5319);
+    expect(usageChunk.usage.prompt_tokens_details).toEqual({ cached_tokens: 5000 });
+
+    // StreamResult carries the cache buckets so the adapter can set span attrs.
+    expect(result.cacheReadTokens).toBe(5000);
+    expect(result.cacheCreationTokens).toBe(300);
+    expect(result.inputTokens).toBe(12);
+    expect(result.outputTokens).toBe(7);
+  });
+
+  it("omits prompt_tokens_details on the usage chunk when no cache fields are reported", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: { id: "msg_nc", usage: { input_tokens: 20, output_tokens: 0 } },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 4 },
+      },
+      { type: "message_stop" },
+    ];
+
+    const result = await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const chunks = parseSseFrames(res.writes).filter(
+      (f): f is Record<string, unknown> => f !== "[DONE]",
+    );
+    const usageChunk = chunks[chunks.length - 1] as any;
+    expect(usageChunk.usage.prompt_tokens).toBe(20);
+    expect(usageChunk.usage.completion_tokens).toBe(4);
+    expect(usageChunk.usage.total_tokens).toBe(24);
+    expect(usageChunk.usage.prompt_tokens_details).toBeUndefined();
+
+    expect(result.cacheReadTokens).toBe(0);
+    expect(result.cacheCreationTokens).toBe(0);
+  });
+
+  it("updates cache token counts when message_delta carries later usage values (last value wins)", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_u",
+          usage: {
+            input_tokens: 1,
+            output_tokens: 0,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "x" } },
+      { type: "content_block_stop", index: 0 },
+      // Anthropic may update usage on message_delta for some models — latest wins.
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          output_tokens: 5,
+          cache_read_input_tokens: 999,
+          cache_creation_input_tokens: 50,
+        },
+      },
+      { type: "message_stop" },
+    ];
+
+    const result = await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    expect(result.cacheReadTokens).toBe(999);
+    expect(result.cacheCreationTokens).toBe(50);
+  });
+
+  it("logs cacheReadTokens and cacheCreationTokens on the mux.anthropic_response event", async () => {
+    const res = makeStubRes();
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg_log",
+          usage: {
+            input_tokens: 3,
+            output_tokens: 0,
+            cache_read_input_tokens: 8740,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      },
+      { type: "message_stop" },
+    ];
+
+    const infoSpy = vi.spyOn(downstreamLogger, "info");
+
+    await streamAnthropicToOpenAI(
+      eventsAsAsyncIterable(events as any),
+      res as unknown as import("express").Response,
+      "claude-sonnet-4-6",
+      { requestedModel: "claude-sonnet-4-6", resolvedModel: "claude-sonnet-4-6" },
+    );
+
+    const calls = infoSpy.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const respEvent = calls.find((c) => c.event === "mux.anthropic_response");
+    expect(respEvent).toBeDefined();
+    expect(respEvent?.cacheReadTokens).toBe(8740);
+    expect(respEvent?.cacheCreationTokens).toBe(0);
+  });
 });
 
 describe("streamDownstream", () => {
@@ -1499,9 +1681,14 @@ describe("streamDownstream", () => {
         .filter(Boolean)
         .join("");
       expect(content).toBe("hi there");
-      const final = chunks[chunks.length - 1] as any;
+      // Trailing chunks: [..., finish_reason chunk, usage chunk].
+      // The usage chunk has choices: []; finish_reason is on the one before it.
+      const finishChunk = chunks[chunks.length - 2] as any;
       // Anthropic end_turn → OpenAI stop (via anthropicStopReasonToOpenAI).
-      expect(final.choices[0].finish_reason).toBe("stop");
+      expect(finishChunk.choices[0].finish_reason).toBe("stop");
+      const usageChunk = chunks[chunks.length - 1] as any;
+      expect(usageChunk.choices).toEqual([]);
+      expect(usageChunk.usage).toBeDefined();
     } finally {
       restore();
     }
