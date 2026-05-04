@@ -2,8 +2,11 @@ import type express from "express";
 
 import type {
   ChatCompletionsRequest,
+  ResponsesRequest,
   RouteDecision,
 } from "../types.js";
+
+export type Protocol = "chat_completions" | "responses";
 
 export type ProviderKind = "openai-compatible" | "anthropic-sdk";
 
@@ -29,6 +32,11 @@ export type ProviderConfig = {
   extraHeaders?: Record<string, string>;
   timeoutMs?: number;
   models: ProviderModelConfig[];
+  protocols?: Protocol[];
+};
+
+export type ProviderCapabilities = {
+  protocols: Protocol[];
 };
 
 // Forward-declared to avoid a circular import with downstream.ts
@@ -49,6 +57,19 @@ export type DownstreamResponseLike = {
   };
 };
 
+export type DownstreamResponsesResponseLike = {
+  id: string;
+  object: "response";
+  created_at: number;
+  model: string;
+  output: unknown[];
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  };
+};
+
 export type DownstreamRequestContextLike = {
   incomingAuthorizationHeader?: string;
   agentweaveHeaders?: Record<string, string>;
@@ -58,6 +79,7 @@ export type Provider = {
   id: string;
   kind: ProviderKind;
   models: ProviderModelConfig[];
+  capabilities: ProviderCapabilities;
   call(
     req: ChatCompletionsRequest,
     route: RouteDecision,
@@ -65,6 +87,17 @@ export type Provider = {
   ): Promise<DownstreamResponseLike>;
   stream(
     req: ChatCompletionsRequest,
+    route: RouteDecision,
+    res: express.Response,
+    ctx?: DownstreamRequestContextLike,
+  ): Promise<void>;
+  callResponses?(
+    req: ResponsesRequest,
+    route: RouteDecision,
+    ctx?: DownstreamRequestContextLike,
+  ): Promise<DownstreamResponsesResponseLike>;
+  streamResponses?(
+    req: ResponsesRequest,
     route: RouteDecision,
     res: express.Response,
     ctx?: DownstreamRequestContextLike,

@@ -49,6 +49,16 @@ export type ChatCompletionsRequest = {
   tool_choice?: OpenAIToolChoice;
 };
 
+export type ResponsesRequest = {
+  model: string;
+  input: unknown;
+  stream?: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  runtime?: string;
+  tools?: unknown[];
+};
+
 export type RouteDecision = {
   requestedModel: string;
   resolvedModel: string;

@@ -18,6 +18,7 @@ import type {
   OpenAIToolCall,
   OpenAIToolChoice,
   OpenAIToolDef,
+  ResponsesRequest,
   RouteDecision,
 } from "./types.js";
 
@@ -1086,4 +1087,79 @@ export const streamDownstream = async (
     }
   }
   throw lastError ?? new DownstreamNotConfiguredError("no providers available");
+};
+
+export const callResponsesDownstream = async (
+  req: ResponsesRequest,
+  route: RouteDecision,
+  context?: DownstreamRequestContext,
+) => {
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider || !provider.callResponses) {
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' does not support responses protocol`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
+    }
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      return await provider.callResponses(req, route, context);
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
+  }
+
+  throw lastError ?? new DownstreamNotConfiguredError("no providers available for responses protocol");
+};
+
+export const streamResponsesDownstream = async (
+  req: ResponsesRequest,
+  route: RouteDecision,
+  res: express.Response,
+  context?: DownstreamRequestContext,
+): Promise<void> => {
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider || !provider.streamResponses) {
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' does not support responses protocol`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
+    }
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      await provider.streamResponses(req, route, res, context);
+      return;
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      if (res.headersSent) throw err;
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
+  }
+
+  throw lastError ?? new DownstreamNotConfiguredError("no providers available for responses protocol");
 };

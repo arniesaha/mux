@@ -57,6 +57,7 @@ describe("provider registry", () => {
     expect(providers).toHaveLength(1);
     expect(providers[0]?.id).toBe("default");
     expect(providers[0]?.kind).toBe("openai-compatible");
+    expect(providers[0]?.capabilities.protocols).toEqual(["chat_completions"]);
   });
 
   it("returns an empty registry when nothing is configured", () => {

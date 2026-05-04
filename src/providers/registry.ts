@@ -55,6 +55,7 @@ const synthesizeLegacyProvider = (): ProviderConfig | null => {
     auth,
     extraHeaders: config.downstreamExtraHeaders,
     timeoutMs: config.downstreamTimeoutMs,
+    protocols: ["chat_completions"],
     models: [],
   };
 };

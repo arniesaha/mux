@@ -96,4 +96,73 @@ describe("createApp", () => {
     config.downstreamMockFallbackEnabled = previousFallback;
     __resetProviderRegistryForTests();
   });
+
+  it("rejects invalid responses payloads", async () => {
+    const res = await request(app).post("/v1/responses").send({ model: "gpt-4.1" });
+    expect(res.status).toBe(400);
+    expect(res.body.error.type).toBe("invalid_request_error");
+  });
+
+  it("fails clearly when no responses-capable provider is configured", async () => {
+    const previousProviders = config.providers;
+    config.providers = [];
+    config.downstreamBaseUrl = null;
+    config.downstreamMockFallbackEnabled = true;
+    __resetProviderRegistryForTests();
+
+    const res = await request(app)
+      .post("/v1/responses")
+      .send({ model: "gpt-4.1", input: "say hi" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toContain("No provider configured for /v1/responses");
+
+    config.providers = previousProviders;
+    __resetProviderRegistryForTests();
+  });
+
+  it("routes /v1/responses to a native responses provider", async () => {
+    const previousProviders = config.providers;
+    config.providers = [
+      {
+        id: "responses-provider",
+        kind: "openai-compatible",
+        baseUrl: "http://127.0.0.1:4000/v1",
+        auth: { mode: "none" },
+        models: [{ id: "gpt-4.1" }],
+        protocols: ["chat_completions", "responses"],
+      },
+    ];
+    __resetProviderRegistryForTests();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/responses")) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_123",
+            object: "response",
+            created_at: 123,
+            model: "gpt-4.1",
+            output: [],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return originalFetch(input, init);
+    };
+
+    const res = await request(app)
+      .post("/v1/responses")
+      .send({ model: "gpt-4.1", input: "say hi" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.object).toBe("response");
+
+    globalThis.fetch = originalFetch;
+    config.providers = previousProviders;
+    __resetProviderRegistryForTests();
+  });
 });

@@ -4,18 +4,20 @@ import pino from "pino";
 import { config } from "./config.js";
 import {
   callDownstream,
+  callResponsesDownstream,
   DownstreamNotConfiguredError,
   DownstreamRequestError,
+  streamResponsesDownstream,
   streamDownstream,
   type DownstreamRequestContext,
 } from "./downstream.js";
-import { resolveRoute } from "./policy.js";
+import { resolveRoute, selectProviderForProtocolAndModel } from "./policy.js";
 // Import the providers barrel for its side-effects — each adapter registers
 // itself with the registry on module load. Must happen before resolveRoute or
 // callDownstream runs.
 import "./providers/index.js";
 import { withTracedRequest, setSpanAttrs } from "./tracing.js";
-import type { ChatCompletionsRequest } from "./types.js";
+import type { ChatCompletionsRequest, ResponsesRequest, RouteDecision } from "./types.js";
 
 const logger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
@@ -141,6 +143,122 @@ export const createApp = () => {
         logger.error({
           event: "mux.unhandled_error",
           runtime,
+          err: error,
+        });
+
+        res.status(500).json({
+          error: {
+            type: "internal_error",
+            message: "Unexpected server error",
+          },
+        });
+      }
+    });
+  });
+
+  app.post("/v1/responses", async (req, res) => {
+    const body = req.body as ResponsesRequest;
+
+    if (!body?.model || body?.input == null) {
+      return res.status(400).json({
+        error: {
+          message: "Invalid payload: model and input are required",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    await withTracedRequest("mux", async () => {
+      const runtime = body.runtime || req.header("x-runtime") || "unknown";
+      const selection = selectProviderForProtocolAndModel("responses", body.model);
+      if (!selection) {
+        return res.status(400).json({
+          error: {
+            type: "invalid_request_error",
+            message: `No provider configured for /v1/responses with model '${body.model}'. Responses MVP currently supports providers that natively expose the Responses API.`,
+          },
+        });
+      }
+
+      const route: RouteDecision = {
+        requestedModel: body.model,
+        resolvedModel: body.model,
+        routeReason: "protocol:responses",
+        provider: config.defaultProvider,
+        backendTarget: config.defaultBackendTarget,
+        providerId: selection.providerId,
+        fallbackProviderIds: selection.fallbackProviderIds,
+      };
+
+      setSpanAttrs({
+        "prov.route.protocol": "responses",
+        "prov.route.requested_model": route.requestedModel,
+        "prov.route.resolved_model": route.resolvedModel,
+        "prov.route.reason": route.routeReason,
+        "prov.route.runtime": runtime,
+        "prov.route.provider_id": route.providerId,
+      });
+
+      logger.info({
+        event: "mux.route_decision",
+        protocol: "responses",
+        runtime,
+        requestedModel: route.requestedModel,
+        resolvedModel: route.resolvedModel,
+        routeReason: route.routeReason,
+        providerId: route.providerId,
+        downstreamMode: config.downstreamMode,
+      });
+
+      try {
+        const agentweaveHeaders: Record<string, string> = {};
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (typeof value === "string" && key.startsWith("x-agentweave-")) {
+            agentweaveHeaders[key] = value;
+          }
+        }
+
+        const downstreamContext: DownstreamRequestContext = {
+          incomingAuthorizationHeader: req.header("authorization") ?? undefined,
+          agentweaveHeaders,
+        };
+
+        const routedBody: ResponsesRequest = { ...body, runtime };
+        if (routedBody.stream) {
+          await streamResponsesDownstream(routedBody, route, res, downstreamContext);
+          return;
+        }
+
+        const downstream = await callResponsesDownstream(routedBody, route, downstreamContext);
+
+        res.status(200).json(downstream);
+      } catch (error) {
+        if (error instanceof DownstreamNotConfiguredError) {
+          res.status(503).json({
+            error: {
+              type: "service_unavailable",
+              message: error.message,
+            },
+          });
+          return;
+        }
+
+        if (error instanceof DownstreamRequestError) {
+          res.status(502).json({
+            error: {
+              type: "downstream_error",
+              message: "Downstream request failed",
+              status: error.status,
+              details: error.payload,
+            },
+          });
+          return;
+        }
+
+        logger.error({
+          event: "mux.unhandled_error",
+          runtime,
+          protocol: "responses",
           err: error,
         });
 

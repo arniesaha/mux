@@ -2,7 +2,7 @@ import type express from "express";
 
 import { setSpanAttrs, withLlmSpan } from "../tracing.js";
 import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
-import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
+import type { ChatCompletionsRequest, ResponsesRequest, RouteDecision } from "../types.js";
 import {
   buildMockResponse,
   DownstreamRequestError,
@@ -47,6 +47,7 @@ const logDownstreamRequest = (
   route: RouteDecision,
   url: string,
   streamed: boolean,
+  protocol: "chat_completions" | "responses" = "chat_completions",
 ): void => {
   downstreamLogger.info({
     event: "mux.downstream_request",
@@ -60,6 +61,7 @@ const logDownstreamRequest = (
     rawRoles: req.messages.map((m) => m.role),
     toolsCount: req.tools?.length ?? 0,
     streamed,
+    protocol,
   });
 };
 
@@ -93,7 +95,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
 
       const payload = { ...req, model: route.resolvedModel };
       const url = `${cfg.baseUrl}/chat/completions`;
-      logDownstreamRequest(cfg, req, route, url, false);
+      logDownstreamRequest(cfg, req, route, url, false, "chat_completions");
       const startedAt = Date.now();
 
       try {
@@ -181,7 +183,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
 
       const payload = { ...req, model: route.resolvedModel, stream: true };
       const url = `${cfg.baseUrl}/chat/completions`;
-      logDownstreamRequest(cfg, req, route, url, true);
+      logDownstreamRequest(cfg, req, route, url, true, "chat_completions");
       const startedAt = Date.now();
 
       try {
@@ -259,12 +261,117 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
     });
   };
 
+  const supportsResponses = (cfg.protocols ?? ["chat_completions"]).includes("responses");
+
+  const callResponses = async (
+    req: ResponsesRequest,
+    route: RouteDecision,
+    context?: DownstreamRequestContext,
+  ) => {
+    if (!cfg.baseUrl) {
+      throw new DownstreamRequestError(503, { message: "responses protocol requires configured baseUrl" });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...(cfg.extraHeaders ?? {}),
+    };
+    const auth = resolveAuthHeaderForProvider(cfg, context);
+    if (auth) headers[auth.header] = auth.value;
+
+    const payload = { ...req, model: route.resolvedModel };
+    const url = `${cfg.baseUrl}/responses`;
+    logDownstreamRequest(cfg, { model: route.resolvedModel, messages: [] }, route, url, false, "responses");
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await parseJsonSafely(response);
+        throw new DownstreamRequestError(response.status, body);
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const streamResponses = async (
+    req: ResponsesRequest,
+    route: RouteDecision,
+    res: express.Response,
+    context?: DownstreamRequestContext,
+  ) => {
+    if (!cfg.baseUrl) {
+      throw new DownstreamRequestError(503, { message: "responses protocol requires configured baseUrl" });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      ...(cfg.extraHeaders ?? {}),
+    };
+    const auth = resolveAuthHeaderForProvider(cfg, context);
+    if (auth) headers[auth.header] = auth.value;
+
+    const payload = { ...req, model: route.resolvedModel, stream: true };
+    const url = `${cfg.baseUrl}/responses`;
+    logDownstreamRequest(cfg, { model: route.resolvedModel, messages: [] }, route, url, true, "responses");
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await parseJsonSafely(response);
+        throw new DownstreamRequestError(response.status, body);
+      }
+      if (!response.body) {
+        throw new DownstreamRequestError(502, { message: "empty response body from downstream" });
+      }
+      if (!res.headersSent) {
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.length) res.write(decoder.decode(value, { stream: true }));
+      }
+      const tail = decoder.decode();
+      if (tail) res.write(tail);
+      res.end();
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
   return {
     id: cfg.id,
     kind: cfg.kind,
     models: cfg.models,
+    capabilities: {
+      protocols: cfg.protocols ?? ["chat_completions"],
+    },
     call,
     stream,
+    ...(supportsResponses
+      ? {
+          callResponses,
+          streamResponses,
+        }
+      : {}),
   };
 };
 

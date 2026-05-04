@@ -19,6 +19,7 @@ Mux is the control point for that problem.
 ## What Mux provides
 
 - an OpenAI-compatible `/v1/chat/completions` endpoint
+- an OpenAI-compatible `/v1/responses` endpoint (MVP: native responses providers only)
 - a configurable policy-based routing rules
 - support for routing across models and providers
 - fallback and escalation handling
@@ -89,7 +90,7 @@ Routing for Max runtime requests is evaluated on the **last user message only** 
 
 Route decisions are logged with: `runtime`, `requestedModel`, `resolvedModel`, `routeReason`, `provider`, `backendTarget`.
 
-## Example request
+## Example requests
 
 ```bash
 curl -s http://localhost:8787/v1/chat/completions \
@@ -97,6 +98,17 @@ curl -s http://localhost:8787/v1/chat/completions \
   -H 'x-runtime: openclaw' \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "say hi"}]}' | jq
 ```
+
+### Responses API (MVP)
+
+```bash
+curl -s http://localhost:8787/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'x-runtime: openclaw' \
+  -d '{"model": "gpt-4.1", "input": "say hi"}' | jq
+```
+
+> Current MVP scope: `/v1/responses` only routes to providers that *natively* support the Responses API (for example, OpenAI-compatible backends exposing `/responses`). Anthropic translation for responses/tools/reasoning is intentionally out of scope for this PR.
 
 ## Environment variables
 

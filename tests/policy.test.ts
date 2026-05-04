@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { config } from "../src/config.js";
-import { resolveRoute } from "../src/policy.js";
+import { resolveRoute, selectProviderForProtocolAndModel } from "../src/policy.js";
 
 describe("resolveRoute", () => {
   it("downgrades gpt-4o to gpt-4o-mini for simple prompts", () => {
@@ -318,5 +318,30 @@ describe("resolveRoute", () => {
 
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
+  });
+});
+
+describe("selectProviderForProtocolAndModel", () => {
+  it("selects responses-capable provider and excludes chat-only providers", () => {
+    const selection = selectProviderForProtocolAndModel("responses", "gpt-4.1", [
+      {
+        id: "chat-only",
+        kind: "openai-compatible",
+        models: [{ id: "gpt-4.1", costInputUsdPerMTok: 1, costOutputUsdPerMTok: 1 }],
+        capabilities: { protocols: ["chat_completions"] },
+        call: async () => { throw new Error("unused"); },
+        stream: async () => {},
+      },
+      {
+        id: "responses-ok",
+        kind: "openai-compatible",
+        models: [{ id: "gpt-4.1", costInputUsdPerMTok: 2, costOutputUsdPerMTok: 2 }],
+        capabilities: { protocols: ["chat_completions", "responses"] },
+        call: async () => { throw new Error("unused"); },
+        stream: async () => {},
+      },
+    ] as any);
+
+    expect(selection).toEqual({ providerId: "responses-ok", fallbackProviderIds: [] });
   });
 });

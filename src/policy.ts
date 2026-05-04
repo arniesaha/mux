@@ -3,6 +3,10 @@ import { listProviders } from "./providers/registry.js";
 import type { Provider } from "./providers/types.js";
 import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
 
+const supportsProtocol = (provider: Provider, protocol: "chat_completions" | "responses"): boolean => {
+  return provider.capabilities.protocols.includes(protocol);
+};
+
 type ProviderSelection = {
   providerId: string;
   fallbacks: string[]; // cost-ordered, primary excluded
@@ -254,4 +258,18 @@ export const resolveRoute = (
     provider: config.defaultProvider,
     backendTarget: config.defaultBackendTarget,
   });
+};
+
+export const selectProviderForProtocolAndModel = (
+  protocol: "chat_completions" | "responses",
+  model: string,
+  providers?: Provider[],
+): { providerId: string; fallbackProviderIds: string[] } | null => {
+  const pool = (providers ?? listProviders()).filter((p) => supportsProtocol(p, protocol));
+  const selection = selectProviderForModel(model, pool);
+  if (!selection) return null;
+  return {
+    providerId: selection.providerId,
+    fallbackProviderIds: selection.fallbacks,
+  };
 };

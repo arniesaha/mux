@@ -90,6 +90,10 @@ const parseProviders = (input: string | undefined): ProviderConfig[] => {
             : undefined,
         timeoutMs: typeof r.timeoutMs === "number" ? r.timeoutMs : undefined,
         models,
+        protocols:
+          Array.isArray(r.protocols)
+            ? (r.protocols.filter((p) => p === "chat_completions" || p === "responses") as Array<"chat_completions" | "responses">)
+            : undefined,
       });
     }
     return out;
