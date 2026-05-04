@@ -38,6 +38,21 @@ export type ChatMessage = {
   tool_call_id?: string;
 };
 
+export type ResponsesInputItem = string | Record<string, unknown>;
+
+export type ResponsesRequest = {
+  model: string;
+  input?: ResponsesInputItem | ResponsesInputItem[];
+  stream?: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  runtime?: string;
+  tools?: unknown[];
+  [key: string]: unknown;
+};
+
+export type RequestProtocol = "chat_completions" | "responses";
+
 export type ChatCompletionsRequest = {
   model: string;
   messages: ChatMessage[];
@@ -50,6 +65,7 @@ export type ChatCompletionsRequest = {
 };
 
 export type RouteDecision = {
+  protocol?: RequestProtocol;
   requestedModel: string;
   resolvedModel: string;
   routeReason: string;

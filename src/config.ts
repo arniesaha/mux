@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 
 import type { ProviderConfig, ProviderKind } from "./providers/types.js";
+import type { RequestProtocol } from "./types.js";
 
 dotenv.config();
 
@@ -51,6 +52,13 @@ const parseDownstreamMode = (input: string | undefined): DownstreamMode => {
   return "openai-compatible";
 };
 
+
+const parseProtocols = (input: unknown, defaultValue: RequestProtocol[]): RequestProtocol[] => {
+  if (!Array.isArray(input)) return defaultValue;
+  const out = input.filter((v): v is RequestProtocol => v === "chat_completions" || v === "responses");
+  return out.length > 0 ? out : defaultValue;
+};
+
 const parseProviders = (input: string | undefined): ProviderConfig[] => {
   if (!input?.trim()) return [];
   try {
@@ -81,6 +89,7 @@ const parseProviders = (input: string | undefined): ProviderConfig[] => {
       out.push({
         id: r.id,
         kind,
+        protocols: parseProtocols(r.protocols, ["chat_completions"]),
         baseUrl:
           typeof r.baseUrl === "string" ? normalizeBaseUrl(r.baseUrl) : null,
         auth,

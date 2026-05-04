@@ -32,6 +32,36 @@ describe("createApp", () => {
     expect(res.body.error.type).toBe("invalid_request_error");
   });
 
+
+  it("rejects invalid responses payloads", async () => {
+    const res = await request(app).post("/v1/responses").send({ input: "hello" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.type).toBe("invalid_request_error");
+  });
+
+  it("returns a stubbed responses payload when responses protocol is enabled", async () => {
+    const previousProtocols = process.env.DOWNSTREAM_PROTOCOLS;
+    process.env.DOWNSTREAM_PROTOCOLS = "chat_completions,responses";
+    __resetProviderRegistryForTests();
+
+    const res = await request(app)
+      .post("/v1/responses")
+      .set("x-runtime", "openclaw")
+      .send({
+        model: "gpt-5.4",
+        input: [{ role: "user", content: [{ type: "input_text", text: "say hi" }] }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.object).toBe("response");
+    expect(res.body.model).toBe("gpt-5.4");
+    expect(JSON.stringify(res.body)).toContain("requested=gpt-5.4");
+
+    process.env.DOWNSTREAM_PROTOCOLS = previousProtocols;
+    __resetProviderRegistryForTests();
+  });
+
   it("returns a stubbed chat completion and honors runtime header", async () => {
     const res = await request(app)
       .post("/v1/chat/completions")

@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { listProviders } from "./providers/registry.js";
 import type { Provider } from "./providers/types.js";
-import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
+import type { ChatCompletionsRequest, RequestProtocol, RouteDecision } from "./types.js";
 
 type ProviderSelection = {
   providerId: string;
@@ -15,9 +15,11 @@ type ProviderSelection = {
 const selectProviderForModel = (
   resolvedModel: string,
   providers: Provider[],
+  protocol: "chat_completions" | "responses",
 ): ProviderSelection | null => {
   const candidates = providers.filter((p) =>
-    p.models.some((m) => m.id === resolvedModel),
+    (p.protocols ?? ["chat_completions"]).includes(protocol) &&
+    (p.models.length === 0 || p.models.some((m) => m.id === resolvedModel)),
   );
   if (candidates.length === 0) return null;
 
@@ -46,7 +48,7 @@ const applyProviderSelection = (
   providers?: Provider[],
 ): RouteDecision => {
   const pool = providers ?? listProviders();
-  const selection = selectProviderForModel(decision.resolvedModel, pool);
+  const selection = selectProviderForModel(decision.resolvedModel, pool, decision.protocol ?? "chat_completions");
   if (!selection) {
     return { ...decision, providerId: "default", fallbackProviderIds: [] };
   }
@@ -152,13 +154,14 @@ const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
 };
 
 export const resolveRoute = (
-  req: ChatCompletionsRequest,
+  req: ChatCompletionsRequest & { protocol?: RequestProtocol },
   providers?: Provider[],
 ): RouteDecision => {
   const requestedModel = req.model;
+  const protocol = req.protocol ?? "chat_completions";
   const finalize = (
-    decision: Omit<RouteDecision, "providerId" | "fallbackProviderIds">,
-  ): RouteDecision => applyProviderSelection(decision, providers);
+    decision: Omit<RouteDecision, "providerId" | "fallbackProviderIds" | "protocol">,
+  ): RouteDecision => applyProviderSelection({ ...decision, protocol }, providers);
 
   if (isAnthropicModel(requestedModel)) {
     const anthropicMapped = config.anthropicModelMap[requestedModel];

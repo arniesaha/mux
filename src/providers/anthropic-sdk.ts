@@ -334,6 +334,7 @@ export const createAnthropicSdkProvider = (cfg: ProviderConfig): Provider => {
     id: cfg.id,
     kind: cfg.kind,
     models: cfg.models,
+    protocols: cfg.protocols ?? ["chat_completions"],
     call,
     stream,
     __resetClient: resetClient,

@@ -2,11 +2,13 @@ import type express from "express";
 
 import { setSpanAttrs, withLlmSpan } from "../tracing.js";
 import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
-import type { ChatCompletionsRequest, RouteDecision } from "../types.js";
+import type { ChatCompletionsRequest, ResponsesRequest, RouteDecision } from "../types.js";
 import {
   buildMockResponse,
+  buildMockResponsesResponse,
   DownstreamRequestError,
   downstreamLogger,
+  emitDownstreamResponsesAsSse,
   emitDownstreamResponseAsSse,
   parseJsonSafely,
   type DownstreamRequestContext,
@@ -68,6 +70,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
     throw new Error(`createOpenAICompatibleProvider: wrong kind=${cfg.kind}`);
   }
   const timeoutMs = cfg.timeoutMs ?? 30_000;
+  const protocols = cfg.protocols ?? ["chat_completions"];
 
   const call = async (
     req: ChatCompletionsRequest,
@@ -149,6 +152,127 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
         });
 
         return result;
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  };
+
+  const callResponses = async (
+    req: ResponsesRequest,
+    route: RouteDecision,
+    context?: DownstreamRequestContext,
+  ): Promise<Record<string, unknown>> => {
+    if (!cfg.baseUrl) {
+      return buildMockResponsesResponse(req, route);
+    }
+
+    return withLlmSpan("openai-compatible", route.resolvedModel, async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        ...(cfg.extraHeaders ?? {}),
+      };
+      const auth = resolveAuthHeaderForProvider(cfg, context);
+      if (auth) headers[auth.header] = auth.value;
+
+      const payload = { ...req, model: route.resolvedModel };
+      const url = `${cfg.baseUrl}/responses`;
+      downstreamLogger.info({
+        event: "mux.downstream_request",
+        protocol: "responses",
+        providerId: cfg.id,
+        requestedModel: route.requestedModel,
+        resolvedModel: route.resolvedModel,
+        url,
+        authMode: cfg.auth.mode,
+        timeoutMs: cfg.timeoutMs ?? null,
+        streamed: false,
+      });
+
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const body = await parseJsonSafely(response);
+          throw new DownstreamRequestError(response.status, body);
+        }
+        return await response.json() as Record<string, unknown>;
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  };
+
+  const streamResponses = async (
+    req: ResponsesRequest,
+    route: RouteDecision,
+    res: express.Response,
+    context?: DownstreamRequestContext,
+  ): Promise<void> => {
+    if (!cfg.baseUrl) {
+      emitDownstreamResponsesAsSse(res, buildMockResponsesResponse(req, route));
+      return;
+    }
+
+    await withLlmSpan("openai-compatible", route.resolvedModel, async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        ...(cfg.extraHeaders ?? {}),
+      };
+      const auth = resolveAuthHeaderForProvider(cfg, context);
+      if (auth) headers[auth.header] = auth.value;
+
+      const payload = { ...req, model: route.resolvedModel, stream: true };
+      const url = `${cfg.baseUrl}/responses`;
+      downstreamLogger.info({
+        event: "mux.downstream_request",
+        protocol: "responses",
+        providerId: cfg.id,
+        requestedModel: route.requestedModel,
+        resolvedModel: route.resolvedModel,
+        url,
+        authMode: cfg.auth.mode,
+        timeoutMs: cfg.timeoutMs ?? null,
+        streamed: true,
+      });
+
+      try {
+        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal: controller.signal });
+        if (!response.ok) {
+          const body = await parseJsonSafely(response);
+          throw new DownstreamRequestError(response.status, body);
+        }
+        if (!response.body) throw new DownstreamRequestError(502, { message: "empty response body from downstream" });
+        if (!res.headersSent) {
+          res.status(200);
+          res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-transform");
+          res.setHeader("Connection", "keep-alive");
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.length) res.write(decoder.decode(value, { stream: true }));
+          }
+          const tail = decoder.decode();
+          if (tail) res.write(tail);
+        } finally {
+          try { reader.releaseLock(); } catch {}
+        }
+        res.end();
       } finally {
         clearTimeout(timeout);
       }
@@ -263,8 +387,11 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
     id: cfg.id,
     kind: cfg.kind,
     models: cfg.models,
+    protocols,
     call,
     stream,
+    callResponses: protocols.includes("responses") ? callResponses : undefined,
+    streamResponses: protocols.includes("responses") ? streamResponses : undefined,
   };
 };
 
