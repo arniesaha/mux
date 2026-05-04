@@ -53,9 +53,18 @@ const parseDownstreamMode = (input: string | undefined): DownstreamMode => {
 };
 
 
+const isRequestProtocol = (v: unknown): v is RequestProtocol =>
+  v === "chat_completions" || v === "responses";
+
 const parseProtocols = (input: unknown, defaultValue: RequestProtocol[]): RequestProtocol[] => {
   if (!Array.isArray(input)) return defaultValue;
-  const out = input.filter((v): v is RequestProtocol => v === "chat_completions" || v === "responses");
+  const out = input.filter(isRequestProtocol);
+  return out.length > 0 ? out : defaultValue;
+};
+
+const parseProtocolsCsv = (input: string | undefined, defaultValue: RequestProtocol[]): RequestProtocol[] => {
+  if (!input?.trim()) return defaultValue;
+  const out = input.split(",").map((s) => s.trim()).filter(isRequestProtocol);
   return out.length > 0 ? out : defaultValue;
 };
 
@@ -143,6 +152,7 @@ export const config = {
   anthropicOauthToken: process.env.ANTHROPIC_OAUTH_TOKEN,
   downstreamTimeoutMs: parseNumber(process.env.DOWNSTREAM_TIMEOUT_MS, 30_000),
   downstreamExtraHeaders: parseJsonMap(process.env.DOWNSTREAM_EXTRA_HEADERS),
+  downstreamProtocols: parseProtocolsCsv(process.env.DOWNSTREAM_PROTOCOLS, ["chat_completions"]),
   downstreamMockFallbackEnabled: parseBoolean(
     process.env.DOWNSTREAM_MOCK_FALLBACK,
     process.env.NODE_ENV !== "production",

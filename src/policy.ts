@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { listProviders } from "./providers/registry.js";
 import type { Provider } from "./providers/types.js";
-import type { ChatCompletionsRequest, RequestProtocol, RouteDecision } from "./types.js";
+import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
 
 type ProviderSelection = {
   providerId: string;
@@ -154,7 +154,7 @@ const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
 };
 
 export const resolveRoute = (
-  req: ChatCompletionsRequest & { protocol?: RequestProtocol },
+  req: ChatCompletionsRequest,
   providers?: Provider[],
 ): RouteDecision => {
   const requestedModel = req.model;

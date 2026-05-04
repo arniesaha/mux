@@ -18,7 +18,6 @@ import type {
   ChatCompletionsRequest,
   ChatMessage,
   RequestProtocol,
-  ResponsesInputItem,
   ResponsesRequest,
 } from "./types.js";
 
@@ -205,8 +204,8 @@ export const createApp = () => {
 
     await withTracedRequest("mux", async () => {
       const runtime = extractRuntime(body, req);
-      const routedBody: ChatCompletionsRequest = { ...body, runtime };
-      const route = resolveRoute({ ...routedBody, protocol: "chat_completions" } as ChatCompletionsRequest & { protocol: RequestProtocol });
+      const routedBody: ChatCompletionsRequest = { ...body, runtime, protocol: "chat_completions" };
+      const route = resolveRoute(routedBody);
       const callerAgentId = req.header("x-agentweave-agent-id") ?? undefined;
       const promptPreview = buildPromptPreviewForChat(body.messages);
 
@@ -249,13 +248,17 @@ export const createApp = () => {
     await withTracedRequest("mux", async () => {
       const runtime = extractRuntime(body, req);
       const routedBody: ResponsesRequest = { ...body, runtime };
+      // Synthetic ChatCompletionsRequest used only for routing/policy
+      // decisions. Not forwarded downstream — the responses adapter sends
+      // `routedBody` (the original ResponsesRequest) verbatim.
       const routingRequest: ChatCompletionsRequest = {
         model: body.model,
         messages: normalizeResponsesInputToMessages(body.input),
         stream: body.stream,
         runtime,
+        protocol: "responses",
       };
-      const route = resolveRoute({ ...routingRequest, protocol: "responses" } as ChatCompletionsRequest & { protocol: RequestProtocol });
+      const route = resolveRoute(routingRequest);
       const callerAgentId = req.header("x-agentweave-agent-id") ?? undefined;
       const inputItems = body.input == null ? 0 : Array.isArray(body.input) ? body.input.length : 1;
       const promptPreview = buildPromptPreviewForResponses(body.input);

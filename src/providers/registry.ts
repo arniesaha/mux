@@ -53,7 +53,7 @@ const synthesizeLegacyProvider = (): ProviderConfig | null => {
     id: "default",
     kind: "openai-compatible",
     baseUrl: config.downstreamBaseUrl,
-    protocols: ((process.env.DOWNSTREAM_PROTOCOLS || "").split(",").map((s) => s.trim()).filter((s) => s === "chat_completions" || s === "responses") as Array<"chat_completions" | "responses">).length ? ((process.env.DOWNSTREAM_PROTOCOLS || "").split(",").map((s) => s.trim()).filter((s) => s === "chat_completions" || s === "responses") as Array<"chat_completions" | "responses">) : ["chat_completions"],
+    protocols: config.downstreamProtocols,
     auth,
     extraHeaders: config.downstreamExtraHeaders,
     timeoutMs: config.downstreamTimeoutMs,

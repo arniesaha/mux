@@ -88,7 +88,12 @@ export const buildMockResponsesResponse = (
   },
 });
 
-export const emitDownstreamResponsesAsSse = (
+// Emits a non-streaming Responses payload as a minimal SSE sequence. Used by
+// the mock fallback path only — real upstreams stream their own SSE which we
+// proxy verbatim. Reads text from the canonical `output[0].content[0].text`
+// shape; the mock builder also sets a top-level `text` mirror so this works
+// without a synthetic walk for the stub case.
+export const emitMockResponsesAsSse = (
   res: express.Response,
   response: DownstreamResponsesResponse,
 ): void => {
@@ -100,11 +105,29 @@ export const emitDownstreamResponsesAsSse = (
   }
   const id = String(response.id ?? `resp_${Date.now()}`);
   const model = String(response.model ?? "unknown");
-  const text = String((response as any).text ?? "");
+  const text = extractMockResponsesText(response);
   res.write(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id, model } })}\n\n`);
   res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", item_id: `${id}_item`, delta: text })}\n\n`);
   res.write(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`);
   res.end();
+};
+
+const extractMockResponsesText = (response: DownstreamResponsesResponse): string => {
+  const topLevel = (response as { text?: unknown }).text;
+  if (typeof topLevel === "string") return topLevel;
+  const output = (response as { output?: unknown }).output;
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      const content = (item as { content?: unknown })?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const t = (block as { text?: unknown })?.text;
+          if (typeof t === "string") return t;
+        }
+      }
+    }
+  }
+  return "";
 };
 
 // Anthropic ephemeral prompt-cache breakpoint. Attaching this to a content
@@ -1207,7 +1230,7 @@ export const streamResponsesDownstream = async (
         providerId === "default" &&
         config.downstreamMockFallbackEnabled
       ) {
-        emitDownstreamResponsesAsSse(res, buildMockResponsesResponse(req, route));
+        emitMockResponsesAsSse(res, buildMockResponsesResponse(req, route));
         return;
       }
       lastError = new DownstreamNotConfiguredError(

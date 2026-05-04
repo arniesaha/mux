@@ -8,7 +8,7 @@ import {
   buildMockResponsesResponse,
   DownstreamRequestError,
   downstreamLogger,
-  emitDownstreamResponsesAsSse,
+  emitMockResponsesAsSse,
   emitDownstreamResponseAsSse,
   parseJsonSafely,
   type DownstreamRequestContext,
@@ -16,6 +16,15 @@ import {
 } from "../downstream.js";
 import { registerAdapter } from "./registry.js";
 import type { Provider, ProviderConfig } from "./types.js";
+
+// Drop Mux-internal fields before forwarding to the downstream API. `runtime`
+// and `protocol` are added by Mux for routing/policy and are not part of the
+// OpenAI request schema; strict downstreams (additional_properties_strict)
+// will 400 if we leak them.
+const stripMuxInternalFields = <T extends Record<string, unknown>>(req: T): Omit<T, "runtime" | "protocol"> => {
+  const { runtime: _runtime, protocol: _protocol, ...rest } = req;
+  return rest;
+};
 
 const resolveAuthHeaderForProvider = (
   cfg: ProviderConfig,
@@ -94,7 +103,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
 
-      const payload = { ...req, model: route.resolvedModel };
+      const payload = { ...stripMuxInternalFields(req), model: route.resolvedModel };
       const url = `${cfg.baseUrl}/chat/completions`;
       logDownstreamRequest(cfg, req, route, url, false);
       const startedAt = Date.now();
@@ -178,7 +187,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
 
-      const payload = { ...req, model: route.resolvedModel };
+      const payload = { ...stripMuxInternalFields(req), model: route.resolvedModel };
       const url = `${cfg.baseUrl}/responses`;
       downstreamLogger.info({
         event: "mux.downstream_request",
@@ -217,7 +226,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
     context?: DownstreamRequestContext,
   ): Promise<void> => {
     if (!cfg.baseUrl) {
-      emitDownstreamResponsesAsSse(res, buildMockResponsesResponse(req, route));
+      emitMockResponsesAsSse(res, buildMockResponsesResponse(req, route));
       return;
     }
 
@@ -232,7 +241,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
 
-      const payload = { ...req, model: route.resolvedModel, stream: true };
+      const payload = { ...stripMuxInternalFields(req), model: route.resolvedModel, stream: true };
       const url = `${cfg.baseUrl}/responses`;
       downstreamLogger.info({
         event: "mux.downstream_request",
@@ -303,7 +312,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
 
-      const payload = { ...req, model: route.resolvedModel, stream: true };
+      const payload = { ...stripMuxInternalFields(req), model: route.resolvedModel, stream: true };
       const url = `${cfg.baseUrl}/chat/completions`;
       logDownstreamRequest(cfg, req, route, url, true);
       const startedAt = Date.now();

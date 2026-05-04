@@ -60,6 +60,10 @@ export type ChatCompletionsRequest = {
   temperature?: number;
   max_tokens?: number;
   runtime?: string;
+  // Mux-internal: which public protocol the caller hit. Set by the route
+  // handlers in app.ts and consumed by policy.ts when filtering providers.
+  // Not forwarded downstream (stripped in openai-compatible adapter).
+  protocol?: RequestProtocol;
   tools?: OpenAIToolDef[];
   tool_choice?: OpenAIToolChoice;
 };
