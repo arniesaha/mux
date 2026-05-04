@@ -28,6 +28,7 @@ const synthesizeLegacyProvider = (): ProviderConfig | null => {
       id: "default",
       kind: "anthropic-sdk",
       baseUrl: config.anthropicBaseUrl,
+      protocols: ["chat_completions"],
       auth: oauth
         ? { mode: "anthropic-oauth", oauthToken: oauth, baseUrl: config.anthropicBaseUrl }
         : { mode: "anthropic-api-key", apiKey: apiKey!, baseUrl: config.anthropicBaseUrl },
@@ -52,6 +53,7 @@ const synthesizeLegacyProvider = (): ProviderConfig | null => {
     id: "default",
     kind: "openai-compatible",
     baseUrl: config.downstreamBaseUrl,
+    protocols: config.downstreamProtocols,
     auth,
     extraHeaders: config.downstreamExtraHeaders,
     timeoutMs: config.downstreamTimeoutMs,

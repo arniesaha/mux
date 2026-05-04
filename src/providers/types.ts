@@ -2,6 +2,8 @@ import type express from "express";
 
 import type {
   ChatCompletionsRequest,
+  RequestProtocol,
+  ResponsesRequest,
   RouteDecision,
 } from "../types.js";
 
@@ -22,6 +24,7 @@ export type ProviderModelConfig = {
 };
 
 export type ProviderConfig = {
+  protocols?: RequestProtocol[];
   id: string;
   kind: ProviderKind;
   baseUrl?: string | null;
@@ -58,6 +61,7 @@ export type Provider = {
   id: string;
   kind: ProviderKind;
   models: ProviderModelConfig[];
+  protocols: RequestProtocol[];
   call(
     req: ChatCompletionsRequest,
     route: RouteDecision,
@@ -65,6 +69,17 @@ export type Provider = {
   ): Promise<DownstreamResponseLike>;
   stream(
     req: ChatCompletionsRequest,
+    route: RouteDecision,
+    res: express.Response,
+    ctx?: DownstreamRequestContextLike,
+  ): Promise<void>;
+  callResponses?(
+    req: ResponsesRequest,
+    route: RouteDecision,
+    ctx?: DownstreamRequestContextLike,
+  ): Promise<unknown>;
+  streamResponses?(
+    req: ResponsesRequest,
     route: RouteDecision,
     res: express.Response,
     ctx?: DownstreamRequestContextLike,

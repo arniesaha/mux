@@ -19,6 +19,7 @@ Mux is the control point for that problem.
 ## What Mux provides
 
 - an OpenAI-compatible `/v1/chat/completions` endpoint
+- native `POST /v1/responses` passthrough for responses-capable downstreams
 - a configurable policy-based routing rules
 - support for routing across models and providers
 - fallback and escalation handling
@@ -72,7 +73,7 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com        # or your proxy URL
 DOWNSTREAM_TIMEOUT_MS=30000
 ```
 
-> **Note:** Keep sending OpenAI-compatible requests to Mux (`/v1/chat/completions`). Mux translates to the downstream API internally.
+> **Note:** `anthropic-sdk` mode still accepts OpenAI-compatible chat requests only. Native `/v1/responses` is currently supported for `openai-compatible` downstreams that expose a real Responses API.
 
 ## Routing behavior
 
@@ -89,13 +90,28 @@ Routing for Max runtime requests is evaluated on the **last user message only** 
 
 Route decisions are logged with: `runtime`, `requestedModel`, `resolvedModel`, `routeReason`, `provider`, `backendTarget`.
 
-## Example request
+### Enable native Responses routing
+
+If you want Mux to accept `POST /v1/responses` for a legacy/default `openai-compatible` downstream, set:
+
+```bash
+DOWNSTREAM_PROTOCOLS=chat_completions,responses
+```
+
+Providers configured via `PROVIDERS` can also declare `protocols: ["chat_completions", "responses"]`.
+
+## Example requests
 
 ```bash
 curl -s http://localhost:8787/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'x-runtime: openclaw' \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "say hi"}]}' | jq
+
+curl -s http://localhost:8787/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'x-runtime: openclaw' \
+  -d '{"model": "gpt-4o", "input": [{"role": "user", "content": [{"type": "input_text", "text": "say hi"}]}]}' | jq
 ```
 
 ## Environment variables
@@ -112,6 +128,7 @@ curl -s http://localhost:8787/v1/chat/completions \
 | `DOWNSTREAM_AUTH_MODE` | `bearer` | `bearer` \| `x-api-key` \| `passthrough` \| `none` |
 | `DOWNSTREAM_EXTRA_HEADERS` | `{}` | JSON map of extra static headers |
 | `DOWNSTREAM_TIMEOUT_MS` | `30000` | Request timeout in ms |
+| `DOWNSTREAM_PROTOCOLS` | `chat_completions` | Comma-separated legacy/default downstream protocols (`chat_completions`, `responses`) |
 | `DOWNSTREAM_MOCK_FALLBACK` | `true` (dev) | Return mock response when no backend configured |
 | `ANTHROPIC_OAUTH_TOKEN` | — | OAuth token (preferred for anthropic-sdk) |
 | `ANTHROPIC_API_KEY` | — | API key fallback for anthropic-sdk |

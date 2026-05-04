@@ -38,6 +38,21 @@ export type ChatMessage = {
   tool_call_id?: string;
 };
 
+export type ResponsesInputItem = string | Record<string, unknown>;
+
+export type ResponsesRequest = {
+  model: string;
+  input?: ResponsesInputItem | ResponsesInputItem[];
+  stream?: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  runtime?: string;
+  tools?: unknown[];
+  [key: string]: unknown;
+};
+
+export type RequestProtocol = "chat_completions" | "responses";
+
 export type ChatCompletionsRequest = {
   model: string;
   messages: ChatMessage[];
@@ -45,11 +60,16 @@ export type ChatCompletionsRequest = {
   temperature?: number;
   max_tokens?: number;
   runtime?: string;
+  // Mux-internal: which public protocol the caller hit. Set by the route
+  // handlers in app.ts and consumed by policy.ts when filtering providers.
+  // Not forwarded downstream (stripped in openai-compatible adapter).
+  protocol?: RequestProtocol;
   tools?: OpenAIToolDef[];
   tool_choice?: OpenAIToolChoice;
 };
 
 export type RouteDecision = {
+  protocol?: RequestProtocol;
   requestedModel: string;
   resolvedModel: string;
   routeReason: string;

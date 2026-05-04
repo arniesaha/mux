@@ -15,6 +15,7 @@ import { setSpanAttrs } from "./tracing.js";
 import "./providers/index.js";
 import type {
   ChatCompletionsRequest,
+  ResponsesRequest,
   OpenAIToolCall,
   OpenAIToolChoice,
   OpenAIToolDef,
@@ -25,6 +26,9 @@ export const downstreamLogger = pino({
   level: config.nodeEnv === "development" ? "debug" : "info",
   name: "mux.downstream",
 });
+
+
+export type DownstreamResponsesResponse = Record<string, unknown>;
 
 export type DownstreamResponse = {
   id: string;
@@ -51,6 +55,79 @@ export type DownstreamResponse = {
       cached_tokens: number;
     };
   };
+};
+
+
+export const buildMockResponsesResponse = (
+  req: ResponsesRequest,
+  route: RouteDecision,
+): DownstreamResponsesResponse => ({
+  id: `resp_${Date.now()}` ,
+  object: "response",
+  created_at: Math.floor(Date.now() / 1000),
+  model: route.resolvedModel,
+  output: [
+    {
+      type: "message",
+      id: `msg_${Date.now()}`,
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: `MVP stub response from Mux responses path. requested=${route.requestedModel}, resolved=${route.resolvedModel}, reason=${route.routeReason}`,
+          annotations: [],
+        },
+      ],
+    },
+  ],
+  text: `MVP stub response from Mux responses path. requested=${route.requestedModel}, resolved=${route.resolvedModel}, reason=${route.routeReason}`,
+  usage: {
+    input_tokens: Math.max(1, Math.ceil(JSON.stringify(req.input ?? "").length / 4)),
+    output_tokens: 24,
+    total_tokens: Math.max(25, Math.ceil(JSON.stringify(req.input ?? "").length / 4) + 24),
+  },
+});
+
+// Emits a non-streaming Responses payload as a minimal SSE sequence. Used by
+// the mock fallback path only — real upstreams stream their own SSE which we
+// proxy verbatim. Reads text from the canonical `output[0].content[0].text`
+// shape; the mock builder also sets a top-level `text` mirror so this works
+// without a synthetic walk for the stub case.
+export const emitMockResponsesAsSse = (
+  res: express.Response,
+  response: DownstreamResponsesResponse,
+): void => {
+  if (!res.headersSent) {
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+  }
+  const id = String(response.id ?? `resp_${Date.now()}`);
+  const model = String(response.model ?? "unknown");
+  const text = extractMockResponsesText(response);
+  res.write(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id, model } })}\n\n`);
+  res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", item_id: `${id}_item`, delta: text })}\n\n`);
+  res.write(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`);
+  res.end();
+};
+
+const extractMockResponsesText = (response: DownstreamResponsesResponse): string => {
+  const topLevel = (response as { text?: unknown }).text;
+  if (typeof topLevel === "string") return topLevel;
+  const output = (response as { output?: unknown }).output;
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      const content = (item as { content?: unknown })?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const t = (block as { text?: unknown })?.text;
+          if (typeof t === "string") return t;
+        }
+      }
+    }
+  }
+  return "";
 };
 
 // Anthropic ephemeral prompt-cache breakpoint. Attaching this to a content
@@ -1086,4 +1163,97 @@ export const streamDownstream = async (
     }
   }
   throw lastError ?? new DownstreamNotConfiguredError("no providers available");
+};
+
+
+export const callResponsesDownstream = async (
+  req: ResponsesRequest,
+  route: RouteDecision,
+  context?: DownstreamRequestContext,
+): Promise<DownstreamResponsesResponse> => {
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider || !provider.protocols.includes("responses") || !provider.callResponses) {
+      if (
+        i === 0 &&
+        chain.length === 1 &&
+        providerId === "default" &&
+        config.downstreamMockFallbackEnabled
+      ) {
+        return buildMockResponsesResponse(req, route);
+      }
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' does not support responses protocol`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
+    }
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      return await provider.callResponses(req, route, context) as DownstreamResponsesResponse;
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
+  }
+
+  throw lastError ?? new DownstreamNotConfiguredError("no responses-capable providers available");
+};
+
+export const streamResponsesDownstream = async (
+  req: ResponsesRequest,
+  route: RouteDecision,
+  res: express.Response,
+  context?: DownstreamRequestContext,
+): Promise<void> => {
+  const chain = buildProviderChain(route);
+  const failedProviders: string[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < chain.length; i++) {
+    const providerId = chain[i]!;
+    const provider = getProvider(providerId);
+    if (!provider || !provider.protocols.includes("responses") || !provider.streamResponses) {
+      if (
+        i === 0 &&
+        chain.length === 1 &&
+        providerId === "default" &&
+        config.downstreamMockFallbackEnabled
+      ) {
+        emitMockResponsesAsSse(res, buildMockResponsesResponse(req, route));
+        return;
+      }
+      lastError = new DownstreamNotConfiguredError(
+        `provider '${providerId}' does not support responses protocol`,
+      );
+      failedProviders.push(providerId);
+      if (i === chain.length - 1) throw lastError;
+      continue;
+    }
+
+    if (i > 0) annotateFailoverHop(i, providerId, failedProviders, lastError);
+
+    try {
+      await provider.streamResponses(req, route, res, context);
+      return;
+    } catch (err) {
+      lastError = err;
+      failedProviders.push(providerId);
+      if (res.headersSent) throw err;
+      if (!isRetryableDownstreamError(err)) throw err;
+      if (i === chain.length - 1) throw err;
+    }
+  }
+
+  throw lastError ?? new DownstreamNotConfiguredError("no responses-capable providers available");
 };
