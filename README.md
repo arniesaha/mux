@@ -228,10 +228,22 @@ session.
 
 **Opt out.** Set `MUX_ANTHROPIC_PROMPT_CACHE=false` to disable.
 
+## Compatibility
+
+See [docs/compatibility.md](docs/compatibility.md) for the full matrix of
+(provider kind × protocol × feature) combinations and which are
+"supported + tested" vs "supported + untested" vs "intentionally unsupported".
+The matrix is the source of truth for what mux actually validates end-to-end —
+unit tests are dense, but the e2e suite under `tests/e2e/` is the gate that
+asserts each public endpoint shape against `createApp()` with mocked
+downstreams.
+
 ## Running tests
 
 ```bash
-npm test
+npm test          # unit suite (fast, hermetic)
+npm run test:e2e  # end-to-end suite (in-process supertest against createApp)
+npm run test:all  # both
 ```
 
 ## Architecture diagrams
