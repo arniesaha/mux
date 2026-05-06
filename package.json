@@ -9,7 +9,7 @@
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --exclude 'tests/e2e/**'",
-    "test:e2e": "vitest run 'tests/e2e/**'",
+    "test:e2e": "vitest run --dir tests/e2e",
     "test:all": "vitest run",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
