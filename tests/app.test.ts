@@ -1,5 +1,5 @@
 import request from "supertest";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
 import { config } from "../src/config.js";
@@ -76,6 +76,40 @@ describe("createApp", () => {
     expect(res.body.model).toBe("gpt-4o-mini");
     expect(res.body.choices?.[0]?.message?.content).toContain("requested=gpt-4o");
     expect(res.body.choices?.[0]?.message?.content).toContain("resolved=gpt-4o-mini");
+  });
+
+  it("redacts prompt preview span attr by default in production", async () => {
+    const previousNodeEnv = config.nodeEnv;
+    const previousTracePreview = config.tracePromptPreviewEnabled;
+    const previousRedactedValue = config.tracePromptPreviewRedactedValue;
+
+    config.nodeEnv = "production";
+    config.tracePromptPreviewEnabled = false;
+    config.tracePromptPreviewRedactedValue = "[redacted]";
+
+    const tracing = await import("../src/tracing.js");
+    const spanSpy = vi.spyOn(tracing, "setSpanAttrs");
+
+    const res = await request(app)
+      .post("/v1/chat/completions")
+      .send({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "super secret prompt" }],
+      });
+
+    expect(res.status).toBe(200);
+    const calls = spanSpy.mock.calls.map((c) => c[0]);
+    const hasRedactedPreview = calls.some(
+      (attrs) =>
+        attrs &&
+        typeof attrs === "object" &&
+        (attrs as Record<string, unknown>)["prov.llm.prompt_preview"] === "[redacted]",
+    );
+    expect(hasRedactedPreview).toBe(true);
+
+    config.nodeEnv = previousNodeEnv;
+    config.tracePromptPreviewEnabled = previousTracePreview;
+    config.tracePromptPreviewRedactedValue = previousRedactedValue;
   });
 
   it("returns OpenAI-compatible SSE chunks when stream=true", async () => {

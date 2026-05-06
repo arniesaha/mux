@@ -96,6 +96,10 @@ const logRouteDecision = (params: {
   inputItemCount?: number;
 }) => {
   const { protocol, runtime, route, callerAgentId, promptPreview, messageCount, inputItemCount } = params;
+  const tracedPromptPreview = config.tracePromptPreviewEnabled
+    ? promptPreview
+    : config.tracePromptPreviewRedactedValue;
+
   setSpanAttrs({
     "prov.route.protocol": protocol,
     "prov.route.requested_model": route.requestedModel,
@@ -104,7 +108,7 @@ const logRouteDecision = (params: {
     "prov.route.runtime": runtime,
     "prov.route.provider_id": route.providerId,
     "prov.llm.model": route.resolvedModel,
-    "prov.llm.prompt_preview": promptPreview,
+    "prov.llm.prompt_preview": tracedPromptPreview,
     ...(typeof messageCount === "number" ? { "prov.route.message_count": messageCount } : {}),
     ...(typeof inputItemCount === "number" ? { "prov.route.input_item_count": inputItemCount } : {}),
     ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
