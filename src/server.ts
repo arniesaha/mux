@@ -1,6 +1,8 @@
 import { createApp } from "./app.js";
-import { config } from "./config.js";
+import { config, validateStartupConfig } from "./config.js";
 import { initTracing } from "./tracing.js";
+
+validateStartupConfig(config);
 
 await initTracing();
 
