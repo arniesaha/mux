@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 
 import type { ProviderConfig, ProviderKind } from "./providers/types.js";
-import type { RequestProtocol } from "./types.js";
+import type { RequestProtocol, RoutingRule } from "./types.js";
 
 dotenv.config();
 
@@ -117,6 +117,45 @@ const parseProviders = (input: string | undefined): ProviderConfig[] => {
   }
 };
 
+const toStringArray = (value: unknown): string[] | undefined => {
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+  return out.length > 0 ? out : undefined;
+};
+
+const parseRoutingRules = (input: string | undefined): RoutingRule[] => {
+  if (!input?.trim()) return [];
+  try {
+    const parsed = JSON.parse(input);
+    if (!Array.isArray(parsed)) return [];
+    const out: RoutingRule[] = [];
+    for (const raw of parsed) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      if (typeof r.id !== "string" || !r.id.trim()) continue;
+      if (typeof r.resolvedModel !== "string" || !r.resolvedModel.trim()) continue;
+      out.push({
+        id: r.id.trim(),
+        protocols: parseProtocols(r.protocols, ["chat_completions"]),
+        runtime: Array.isArray(r.runtime) ? toStringArray(r.runtime) : typeof r.runtime === "string" ? r.runtime.trim() : undefined,
+        requestedModel: Array.isArray(r.requestedModel)
+          ? toStringArray(r.requestedModel)
+          : typeof r.requestedModel === "string"
+            ? r.requestedModel.trim()
+            : undefined,
+        promptIncludesAny: toStringArray(r.promptIncludesAny),
+        maxPromptLength: typeof r.maxPromptLength === "number" && r.maxPromptLength > 0 ? r.maxPromptLength : undefined,
+        resolvedModel: r.resolvedModel.trim(),
+        routeReason: typeof r.routeReason === "string" && r.routeReason.trim() ? r.routeReason.trim() : undefined,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+};
+
 const parseJsonMap = (input: string | undefined): Record<string, string> => {
   if (!input) return {};
 
@@ -166,6 +205,7 @@ export const config = {
   tracePromptPreviewRedactedValue:
     process.env.TRACE_PROMPT_PREVIEW_REDACTED_VALUE || "[redacted]",
   providers: parseProviders(process.env.PROVIDERS),
+  routingRules: parseRoutingRules(process.env.ROUTING_RULES),
   failoverMaxAttempts: parseNonNegativeInt(process.env.FAILOVER_MAX_ATTEMPTS, 1),
   // Inject Anthropic ephemeral prompt-cache breakpoints in the OpenAI →
   // Anthropic translator (system prompt, tools, history). On by default —

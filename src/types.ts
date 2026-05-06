@@ -53,6 +53,17 @@ export type ResponsesRequest = {
 
 export type RequestProtocol = "chat_completions" | "responses";
 
+export type RoutingRule = {
+  id: string;
+  protocols?: RequestProtocol[];
+  runtime?: string | string[];
+  requestedModel?: string | string[];
+  promptIncludesAny?: string[];
+  maxPromptLength?: number;
+  resolvedModel: string;
+  routeReason?: string;
+};
+
 export type ChatCompletionsRequest = {
   model: string;
   messages: ChatMessage[];
@@ -73,6 +84,7 @@ export type RouteDecision = {
   requestedModel: string;
   resolvedModel: string;
   routeReason: string;
+  matchedRuleId?: string;
   // Legacy descriptive fields (kind + target). Kept for log/dashboard
   // compatibility. New code should use `providerId` for dispatch.
   provider: string;

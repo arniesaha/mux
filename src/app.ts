@@ -105,6 +105,31 @@ const normalizeResponsesInputToMessages = (input: ResponsesRequest["input"]): Ch
   return [{ role: "user", content }];
 };
 
+const buildRoutingRequest = (body: Record<string, unknown>, req: express.Request): ChatCompletionsRequest | null => {
+  const runtime = extractRuntime(body as { runtime?: string }, req);
+  const protocol = body.protocol === "responses" ? "responses" : "chat_completions";
+
+  if (protocol === "responses") {
+    if (typeof body.model !== "string") return null;
+    return {
+      model: body.model,
+      messages: normalizeResponsesInputToMessages(body.input as ResponsesRequest["input"]),
+      stream: Boolean(body.stream),
+      runtime,
+      protocol,
+    };
+  }
+
+  if (typeof body.model !== "string" || !Array.isArray(body.messages)) return null;
+  return {
+    ...(body as ChatCompletionsRequest),
+    model: body.model,
+    messages: body.messages as ChatMessage[],
+    runtime,
+    protocol,
+  };
+};
+
 const logRouteDecision = (params: {
   protocol: RequestProtocol;
   runtime: string;
@@ -142,6 +167,7 @@ const logRouteDecision = (params: {
     routeReason: route.routeReason,
     provider: route.provider,
     providerId: route.providerId,
+    matchedRuleId: route.matchedRuleId,
     backendTarget: route.backendTarget,
     downstreamMode: config.downstreamMode,
   });
@@ -248,6 +274,22 @@ export const createApp = () => {
       },
       ...(ready ? {} : { reasons: problems }),
     });
+  });
+
+  app.post("/v1/route/resolve", (req, res) => {
+    const routingRequest = buildRoutingRequest(req.body as Record<string, unknown>, req);
+
+    if (!routingRequest) {
+      return res.status(400).json({
+        error: {
+          message: "Invalid payload: expected { model, messages[] } or { protocol: 'responses', model, input }",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    const route = resolveRoute(routingRequest);
+    return res.status(200).json({ route });
   });
 
   app.post("/v1/chat/completions", async (req, res) => {
