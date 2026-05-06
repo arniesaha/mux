@@ -319,4 +319,61 @@ describe("resolveRoute", () => {
     config.modelMap = previousModelMap;
     config.anthropicModelMap = previousAnthropicModelMap;
   });
+
+  it("applies configured routing rules before built-in heuristics", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    const previousRoutingRules = config.routingRules;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+    config.routingRules = [
+      {
+        id: "force-cheap-gpt4o",
+        requestedModel: "gpt-4o",
+        maxPromptLength: 500,
+        resolvedModel: "gpt-4.1-mini",
+      },
+    ];
+
+    const route = resolveRoute({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "say hi" }],
+    });
+
+    expect(route.resolvedModel).toBe("gpt-4.1-mini");
+    expect(route.routeReason).toBe("config:routing_rule:force-cheap-gpt4o");
+    expect(route.matchedRuleId).toBe("force-cheap-gpt4o");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+    config.routingRules = previousRoutingRules;
+  });
+
+  it("falls back to built-in heuristics when no configured rule matches", () => {
+    const previousModelMap = config.modelMap;
+    const previousAnthropicModelMap = config.anthropicModelMap;
+    const previousRoutingRules = config.routingRules;
+    config.modelMap = {};
+    config.anthropicModelMap = {};
+    config.routingRules = [
+      {
+        id: "only-max",
+        runtime: "max",
+        requestedModel: "gpt-4o",
+        resolvedModel: "gpt-4.1-mini",
+      },
+    ];
+
+    const route = resolveRoute({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "say hi" }],
+    });
+
+    expect(route.resolvedModel).toBe("gpt-4o-mini");
+    expect(route.routeReason).toBe("heuristic:downgrade_simple_prompt");
+
+    config.modelMap = previousModelMap;
+    config.anthropicModelMap = previousAnthropicModelMap;
+    config.routingRules = previousRoutingRules;
+  });
 });

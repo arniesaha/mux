@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { listProviders } from "./providers/registry.js";
 import type { Provider } from "./providers/types.js";
-import type { ChatCompletionsRequest, RouteDecision } from "./types.js";
+import type { ChatCompletionsRequest, RouteDecision, RoutingRule } from "./types.js";
 
 type ProviderSelection = {
   providerId: string;
@@ -65,6 +65,12 @@ const applyProviderSelection = (
 const containsAny = (text: string, cues: string[]): boolean => {
   const lower = text.toLowerCase();
   return cues.some((cue) => lower.includes(cue));
+};
+
+const matchesStringOrList = (value: string, matcher: string | string[] | undefined): boolean => {
+  if (!matcher) return true;
+  if (typeof matcher === "string") return value.toLowerCase() === matcher.toLowerCase();
+  return matcher.some((item) => value.toLowerCase() === item.toLowerCase());
 };
 
 const containsEscalationCue = (text: string): boolean => {
@@ -153,6 +159,44 @@ const isSimplePrompt = (req: ChatCompletionsRequest): boolean => {
   return textLength < 80;
 };
 
+const getLastUserText = (req: ChatCompletionsRequest): string => {
+  const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+  return lastUserMsg
+    ? typeof lastUserMsg.content === "string"
+      ? lastUserMsg.content
+      : JSON.stringify(lastUserMsg.content)
+    : "";
+};
+
+const matchRoutingRule = (rule: RoutingRule, req: ChatCompletionsRequest, prompt: string): boolean => {
+  const protocol = req.protocol ?? "chat_completions";
+  if (rule.protocols && !rule.protocols.includes(protocol)) return false;
+  if (!matchesStringOrList(req.model, rule.requestedModel)) return false;
+  if (!matchesStringOrList(req.runtime ?? "unknown", rule.runtime)) return false;
+  if (typeof rule.maxPromptLength === "number" && prompt.length > rule.maxPromptLength) return false;
+  if (rule.promptIncludesAny && !containsAny(prompt, rule.promptIncludesAny)) return false;
+  return true;
+};
+
+const resolveConfiguredRule = (
+  req: ChatCompletionsRequest,
+): Omit<RouteDecision, "providerId" | "fallbackProviderIds" | "protocol"> | null => {
+  if (config.routingRules.length === 0) return null;
+  const prompt = getLastUserText(req);
+  for (const rule of config.routingRules) {
+    if (!matchRoutingRule(rule, req, prompt)) continue;
+    return {
+      requestedModel: req.model,
+      resolvedModel: rule.resolvedModel,
+      routeReason: rule.routeReason ?? `config:routing_rule:${rule.id}`,
+      matchedRuleId: rule.id,
+      provider: config.defaultProvider,
+      backendTarget: config.defaultBackendTarget,
+    };
+  }
+  return null;
+};
+
 export const resolveRoute = (
   req: ChatCompletionsRequest,
   providers?: Provider[],
@@ -234,10 +278,12 @@ export const resolveRoute = (
     });
   }
 
-  const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
-  const lastUserText = lastUserMsg
-    ? (typeof lastUserMsg.content === "string" ? lastUserMsg.content : JSON.stringify(lastUserMsg.content))
-    : "";
+  const configuredRule = resolveConfiguredRule(req);
+  if (configuredRule) {
+    return finalize(configuredRule);
+  }
+
+  const lastUserText = getLastUserText(req);
   const escalation = containsEscalationCue(lastUserText);
 
   if (requestedModel === "gpt-4o" && !escalation) {

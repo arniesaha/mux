@@ -11,6 +11,7 @@ describe("createApp", () => {
     config.downstreamBaseUrl = null;
     config.downstreamMockFallbackEnabled = true;
     config.modelMap = {};
+    config.routingRules = [];
   });
 
   const app = createApp();
@@ -234,5 +235,46 @@ describe("createApp", () => {
     config.downstreamBaseUrl = previousBaseUrl;
     config.downstreamMockFallbackEnabled = previousFallback;
     __resetProviderRegistryForTests();
+  });
+
+  it("explains a configured route decision without calling downstream", async () => {
+    const previousRoutingRules = config.routingRules;
+    config.routingRules = [
+      {
+        id: "simple-openclaw-override",
+        runtime: "openclaw",
+        requestedModel: "gpt-4o",
+        maxPromptLength: 100,
+        resolvedModel: "gpt-4.1-mini",
+      },
+    ];
+
+    const res = await request(app)
+      .post("/v1/route/resolve")
+      .set("x-runtime", "openclaw")
+      .send({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "say hi" }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route.resolvedModel).toBe("gpt-4.1-mini");
+    expect(res.body.route.matchedRuleId).toBe("simple-openclaw-override");
+
+    config.routingRules = previousRoutingRules;
+  });
+
+  it("explains responses routing payloads", async () => {
+    const res = await request(app)
+      .post("/v1/route/resolve")
+      .send({
+        protocol: "responses",
+        model: "gpt-4o",
+        input: [{ role: "user", content: [{ type: "input_text", text: "say hi" }] }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route.protocol).toBe("responses");
+    expect(res.body.route.resolvedModel).toBe("gpt-4o-mini");
   });
 });

@@ -24,6 +24,7 @@ Mux is the control point for that problem.
 - support for routing across models and providers
 - fallback and escalation handling
 - structured routing metadata for observability
+- an explain/dry-run route endpoint for debugging policy decisions
 
 ## Architecture
 
@@ -90,6 +91,59 @@ Routing for Max runtime requests is evaluated on the **last user message only** 
 
 Route decisions are logged with: `runtime`, `requestedModel`, `resolvedModel`, `routeReason`, `provider`, `backendTarget`.
 
+### Declarative routing rules
+
+If you want something more flexible than the built-in heuristics in `src/policy.ts`,
+set `ROUTING_RULES` to an ordered JSON array. First match wins.
+
+Supported fields per rule:
+
+- `id` — required unique identifier
+- `protocols` — optional array of `chat_completions` / `responses`
+- `runtime` — optional string or string[]
+- `requestedModel` — optional string or string[]
+- `promptIncludesAny` — optional string[] keyword match on the last user message
+- `maxPromptLength` — optional upper bound for last-user-message length
+- `resolvedModel` — required routed model
+- `routeReason` — optional custom reason string
+
+Example:
+
+```bash
+ROUTING_RULES='[
+  {
+    "id": "simple-openclaw-gpt4o",
+    "runtime": "openclaw",
+    "requestedModel": "gpt-4o",
+    "maxPromptLength": 120,
+    "resolvedModel": "gpt-4o-mini"
+  }
+]'
+```
+
+Config rules are applied after `MODEL_MAP` / `ANTHROPIC_MODEL_MAP` and before the built-in heuristics, so explicit overrides still win and defaults remain as fallback behavior.
+
+### Explain / dry-run route decisions
+
+Mux exposes a no-downstream debug endpoint:
+
+```bash
+curl -s http://localhost:8787/v1/route/resolve \
+  -H 'content-type: application/json' \
+  -H 'x-runtime: openclaw' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"say hi"}]}' | jq
+```
+
+For Responses-style callers:
+
+```bash
+curl -s http://localhost:8787/v1/route/resolve \
+  -H 'content-type: application/json' \
+  -d '{"protocol":"responses","model":"gpt-4o","input":[{"role":"user","content":[{"type":"input_text","text":"say hi"}]}]}' | jq
+```
+
+This returns the resolved route metadata, including `matchedRuleId` when a declarative rule fired.
+
 ### Enable native Responses routing
 
 If you want Mux to accept `POST /v1/responses` for a legacy/default `openai-compatible` downstream, set:
@@ -130,6 +184,7 @@ curl -s http://localhost:8787/v1/responses \
 | `DOWNSTREAM_TIMEOUT_MS` | `30000` | Request timeout in ms |
 | `DOWNSTREAM_PROTOCOLS` | `chat_completions` | Comma-separated legacy/default downstream protocols (`chat_completions`, `responses`) |
 | `DOWNSTREAM_MOCK_FALLBACK` | `true` (dev) | Return mock response when no backend configured |
+| `ROUTING_RULES` | `[]` | Ordered JSON array of declarative routing rules applied before built-in heuristics |
 | `ANTHROPIC_OAUTH_TOKEN` | — | OAuth token (preferred for anthropic-sdk) |
 | `ANTHROPIC_API_KEY` | — | API key fallback for anthropic-sdk |
 | `ANTHROPIC_BASE_URL` | — | Override Anthropic API URL (supports proxies) |
