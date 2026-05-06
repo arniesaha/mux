@@ -85,7 +85,8 @@ systemctl --user status  mux.service --no-pager
 journalctl --user -u mux.service -n 30 --no-pager
 
 # Smoke
-curl -s http://localhost:8787/health
+curl -s http://localhost:8787/health   # liveness
+curl -s http://localhost:8787/ready    # readiness + provider diagnostics
 ```
 
 > **Drift caveat:** `package-lock.json` sometimes accumulates `peer: true`
@@ -199,6 +200,7 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now mux.service
 curl -s http://localhost:8787/health
+curl -s http://localhost:8787/ready
 ```
 
 ---
