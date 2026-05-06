@@ -25,6 +25,43 @@ describe("createApp", () => {
     });
   });
 
+  it("returns readiness with safe provider diagnostics", async () => {
+    const res = await request(app).get("/ready");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      service: "mux",
+      providerCount: 1,
+    });
+    expect(Array.isArray(res.body.diagnostics?.providers)).toBe(true);
+    expect(res.body.diagnostics.providers[0]).toMatchObject({
+      id: "default",
+      kind: "openai-compatible",
+    });
+    expect(JSON.stringify(res.body)).not.toContain("apiKey");
+    expect(JSON.stringify(res.body)).not.toContain("authorization");
+  });
+
+  it("returns 503 readiness when mux cannot route traffic", async () => {
+    const previousBaseUrl = config.downstreamBaseUrl;
+    const previousFallback = config.downstreamMockFallbackEnabled;
+
+    config.downstreamBaseUrl = null;
+    config.downstreamMockFallbackEnabled = false;
+    __resetProviderRegistryForTests();
+
+    const res = await request(app).get("/ready");
+
+    expect(res.status).toBe(503);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.reasons).toContain("no providers are registered");
+
+    config.downstreamBaseUrl = previousBaseUrl;
+    config.downstreamMockFallbackEnabled = previousFallback;
+    __resetProviderRegistryForTests();
+  });
+
   it("rejects invalid chat completions payloads", async () => {
     const res = await request(app).post("/v1/chat/completions").send({ messages: [] });
 

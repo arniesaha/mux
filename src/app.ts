@@ -2,6 +2,7 @@ import express from "express";
 import pino from "pino";
 
 import { config } from "./config.js";
+import { listProviders } from "./providers/registry.js";
 import {
   callDownstream,
   callResponsesDownstream,
@@ -188,6 +189,43 @@ export const createApp = () => {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "mux", env: config.nodeEnv });
+  });
+
+  app.get("/ready", (_req, res) => {
+    const providers = listProviders();
+    const diagnostics = providers.map((provider) => ({
+      id: provider.id,
+      kind: provider.kind,
+      protocols: provider.protocols,
+      modelCount: provider.models.length,
+      hasResponses: provider.protocols.includes("responses"),
+    }));
+
+    const problems: string[] = [];
+    if (providers.length === 0) {
+      problems.push("no providers are registered");
+    }
+
+    const hasChatCapableProvider = providers.some((provider) =>
+      provider.protocols.includes("chat_completions"),
+    );
+    if (!hasChatCapableProvider) {
+      problems.push("no provider supports chat_completions");
+    }
+
+    const ready = problems.length === 0;
+    const status = ready ? 200 : 503;
+
+    res.status(status).json({
+      ok: ready,
+      service: "mux",
+      env: config.nodeEnv,
+      providerCount: providers.length,
+      diagnostics: {
+        providers: diagnostics,
+      },
+      ...(ready ? {} : { reasons: problems }),
+    });
   });
 
   app.post("/v1/chat/completions", async (req, res) => {
