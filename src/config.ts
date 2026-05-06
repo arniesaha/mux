@@ -159,6 +159,12 @@ export const config = {
   ),
   agentweaveOtlpEndpoint: process.env.AGENTWEAVE_OTLP_ENDPOINT || null,
   agentweaveAgentId: process.env.AGENTWEAVE_AGENT_ID || "mux-router",
+  tracePromptPreviewEnabled: parseBoolean(
+    process.env.TRACE_PROMPT_PREVIEW_ENABLED,
+    process.env.NODE_ENV !== "production",
+  ),
+  tracePromptPreviewRedactedValue:
+    process.env.TRACE_PROMPT_PREVIEW_REDACTED_VALUE || "[redacted]",
   providers: parseProviders(process.env.PROVIDERS),
   failoverMaxAttempts: parseNonNegativeInt(process.env.FAILOVER_MAX_ATTEMPTS, 1),
   // Inject Anthropic ephemeral prompt-cache breakpoints in the OpenAI →

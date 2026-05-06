@@ -57,6 +57,24 @@ const extractTextFromUnknown = (value: unknown): string[] => {
   return out;
 };
 
+const redactPromptPreview = (value: string): string => {
+  if (!value) return value;
+
+  return value
+    // email addresses
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+    // bearer tokens
+    .replace(/\bbearer\s+[a-z0-9._~+/=-]+\b/gi, "Bearer [redacted-token]")
+    // common api key formats (OpenAI, Anthropic, GitHub, Google, AWS)
+    .replace(/\b(sk-[a-z0-9_-]{16,}|sk-ant-[a-z0-9_-]{16,}|ghp_[a-z0-9]{20,}|AIza[a-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b/g, "[redacted-api-key]")
+    // key/value secret-ish fields
+    .replace(/\b(token|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*([^\s,;]+)/gi, "$1=[redacted]")
+    // urls with sensitive query params
+    .replace(/https?:\/\/[^\s)]+/gi, (url) =>
+      url.replace(/([?&](?:token|access_token|auth|key|api_key|secret|sig|signature|password)=)[^&#\s]*/gi, "$1[redacted]"),
+    );
+};
+
 const buildPromptPreviewForChat = (messages: ChatMessage[]): string => {
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
   if (!lastUserMsg) return "";
@@ -96,6 +114,10 @@ const logRouteDecision = (params: {
   inputItemCount?: number;
 }) => {
   const { protocol, runtime, route, callerAgentId, promptPreview, messageCount, inputItemCount } = params;
+  const tracedPromptPreview = config.tracePromptPreviewEnabled
+    ? redactPromptPreview(promptPreview)
+    : config.tracePromptPreviewRedactedValue;
+
   setSpanAttrs({
     "prov.route.protocol": protocol,
     "prov.route.requested_model": route.requestedModel,
@@ -104,7 +126,7 @@ const logRouteDecision = (params: {
     "prov.route.runtime": runtime,
     "prov.route.provider_id": route.providerId,
     "prov.llm.model": route.resolvedModel,
-    "prov.llm.prompt_preview": promptPreview,
+    "prov.llm.prompt_preview": tracedPromptPreview,
     ...(typeof messageCount === "number" ? { "prov.route.message_count": messageCount } : {}),
     ...(typeof inputItemCount === "number" ? { "prov.route.input_item_count": inputItemCount } : {}),
     ...(callerAgentId ? { "prov.agent.id": callerAgentId } : {}),
