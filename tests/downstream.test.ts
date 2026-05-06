@@ -8,6 +8,7 @@ import {
   DownstreamRequestError,
   anthropicStopReasonToOpenAI,
   downstreamLogger,
+  isRetryableDownstreamError,
   streamAnthropicToOpenAI,
   streamDownstream,
   toAnthropicInput,
@@ -28,6 +29,8 @@ const route: RouteDecision = {
   routeReason: "heuristic:test",
   provider: "openai-compatible",
   backendTarget: "http://localhost:4000/v1",
+  providerId: "default",
+  fallbackProviderIds: [],
 };
 
 afterEach(() => {
@@ -2508,5 +2511,248 @@ describe("toOpenAIResponse — cache usage surfacing", () => {
     expect(
       (response.usage as { prompt_tokens_details?: unknown }).prompt_tokens_details,
     ).toBeUndefined();
+  });
+});
+
+// --- issue #47 follow-ups: retry classification + chain-order + headers-sent --
+
+describe("isRetryableDownstreamError — cause.code classification", () => {
+  const fetchFailedWithCause = (code: string): TypeError =>
+    new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect"), { code }),
+    });
+
+  it.each([
+    ["ECONNREFUSED"],
+    ["ECONNRESET"],
+    ["ENOTFOUND"],
+    ["EAI_AGAIN"],
+    ["ETIMEDOUT"],
+    ["UND_ERR_SOCKET"],
+  ])("classifies cause.code=%s as retryable", (code) => {
+    expect(isRetryableDownstreamError(fetchFailedWithCause(code))).toBe(true);
+  });
+
+  it("does not classify an unknown cause.code as retryable on its own merits", () => {
+    // The "fetch failed" message fallback still fires here, which is the
+    // intended behavior — the cause-code path is authoritative for known
+    // codes, the message fallback covers the rest.
+    const err = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("x"), { code: "UNEXPECTED_CODE" }),
+    });
+    expect(isRetryableDownstreamError(err)).toBe(true);
+  });
+
+  it("does not retry on plain non-network errors", () => {
+    expect(isRetryableDownstreamError(new Error("application bug"))).toBe(false);
+  });
+
+  it("retries on AbortError (timeout)", () => {
+    const err = new Error("timeout");
+    err.name = "AbortError";
+    expect(isRetryableDownstreamError(err)).toBe(true);
+  });
+});
+
+describe("callDownstream — chain order across 3 providers", () => {
+  const threeProviderRoute: RouteDecision = {
+    requestedModel: "gpt-4o",
+    resolvedModel: "gpt-4o-mini",
+    routeReason: "heuristic:test+cost_weighted",
+    provider: "openai-compatible",
+    backendTarget: "http://a/v1",
+    providerId: "a",
+    fallbackProviderIds: ["b", "c"],
+  };
+
+  const setupThreeProviders = () => {
+    const previousProviders = config.providers;
+    const previousAttempts = config.failoverMaxAttempts;
+    config.providers = [
+      {
+        id: "a", kind: "openai-compatible", baseUrl: "http://a/v1",
+        auth: { mode: "bearer", apiKey: "k-a" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.1, costOutputUsdPerMTok: 0.4 }],
+      },
+      {
+        id: "b", kind: "openai-compatible", baseUrl: "http://b/v1",
+        auth: { mode: "bearer", apiKey: "k-b" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.2, costOutputUsdPerMTok: 0.5 }],
+      },
+      {
+        id: "c", kind: "openai-compatible", baseUrl: "http://c/v1",
+        auth: { mode: "bearer", apiKey: "k-c" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.3, costOutputUsdPerMTok: 0.6 }],
+      },
+    ];
+    config.failoverMaxAttempts = 2;
+    __resetAnthropicClientForTests();
+    return () => {
+      config.providers = previousProviders;
+      config.failoverMaxAttempts = previousAttempts;
+      __resetAnthropicClientForTests();
+    };
+  };
+
+  it("walks a→b→c and succeeds on c when a and b error", async () => {
+    const restore = setupThreeProviders();
+    try {
+      const callOrder: string[] = [];
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith("http://a/")) {
+            callOrder.push("a");
+            return new Response("x", { status: 503 });
+          }
+          if (url.startsWith("http://b/")) {
+            callOrder.push("b");
+            return new Response("y", { status: 502 });
+          }
+          if (url.startsWith("http://c/")) {
+            callOrder.push("c");
+            return new Response(
+              JSON.stringify({
+                id: "x", object: "chat.completion", created: 1, model: "gpt-4o-mini",
+                choices: [{ index: 0, message: { role: "assistant", content: "from-c" }, finish_reason: "stop" }],
+                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          throw new Error(`unexpected url: ${url}`);
+        });
+
+      const result = await callDownstream(requestPayload, threeProviderRoute);
+      expect(callOrder).toEqual(["a", "b", "c"]);
+      expect(result.choices[0]?.message.content).toBe("from-c");
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("streamDownstream — headers-sent guard with retryable mid-stream error", () => {
+  const streamRoute: RouteDecision = {
+    requestedModel: "gpt-4o",
+    resolvedModel: "gpt-4o-mini",
+    routeReason: "heuristic:test+cost_weighted",
+    provider: "openai-compatible",
+    backendTarget: "http://a/v1",
+    providerId: "a",
+    fallbackProviderIds: ["b"],
+  };
+
+  const setupTwoProviders = () => {
+    const previousProviders = config.providers;
+    const previousAttempts = config.failoverMaxAttempts;
+    config.providers = [
+      {
+        id: "a", kind: "openai-compatible", baseUrl: "http://a/v1",
+        auth: { mode: "bearer", apiKey: "k-a" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.1, costOutputUsdPerMTok: 0.4 }],
+      },
+      {
+        id: "b", kind: "openai-compatible", baseUrl: "http://b/v1",
+        auth: { mode: "bearer", apiKey: "k-b" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.2, costOutputUsdPerMTok: 0.5 }],
+      },
+    ];
+    config.failoverMaxAttempts = 1;
+    __resetAnthropicClientForTests();
+    return () => {
+      config.providers = previousProviders;
+      config.failoverMaxAttempts = previousAttempts;
+      __resetAnthropicClientForTests();
+    };
+  };
+
+  const makeStreamRes = () => {
+    const res = {
+      statusCode: 0,
+      headersSent: false,
+      headers: {} as Record<string, string>,
+      writes: [] as string[],
+      ended: false,
+      _listeners: {} as Record<string, Array<() => void>>,
+      status(code: number) { res.statusCode = code; return res; },
+      setHeader(k: string, v: string) { res.headers[k] = v; },
+      getHeader(k: string) { return res.headers[k]; },
+      write(chunk: string) { res.headersSent = true; res.writes.push(chunk); return true; },
+      end() { res.ended = true; },
+      once(event: string, cb: () => void) { (res._listeners[event] ||= []).push(cb); },
+      off(event: string, cb: () => void) {
+        const list = res._listeners[event];
+        if (!list) return;
+        const i = list.indexOf(cb);
+        if (i >= 0) list.splice(i, 1);
+      },
+      emit(event: string) { for (const cb of res._listeners[event] ?? []) cb(); },
+    };
+    return res;
+  };
+
+  it("does NOT failover after bytes have been written, even on a retryable error", async () => {
+    // Once the response writer has flushed any bytes, restarting against
+    // provider B would corrupt the SSE stream (mixed framing, duplicate
+    // [DONE], etc.). The headers-sent guard must block failover regardless
+    // of error retryability.
+    const restore = setupTwoProviders();
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith("http://a/")) {
+            // Emit one valid SSE frame, then a retryable network-class error.
+            const encoder = new TextEncoder();
+            const stream = new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      id: "c", object: "chat.completion.chunk", created: 1, model: "gpt-4o-mini",
+                      choices: [{ index: 0, delta: { role: "assistant", content: "partial-from-a" }, finish_reason: null }],
+                    })}\n\n`,
+                  ),
+                );
+              },
+              pull(controller) {
+                controller.error(
+                  new TypeError("fetch failed", {
+                    cause: Object.assign(new Error("conn reset"), { code: "ECONNRESET" }),
+                  }),
+                );
+              },
+            });
+            return new Response(stream, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          }
+          throw new Error("provider b must not be called once headers are sent");
+        });
+
+      const res = makeStreamRes();
+      await expect(
+        streamDownstream(
+          { ...requestPayload, stream: true },
+          streamRoute,
+          res as unknown as import("express").Response,
+        ),
+      ).rejects.toBeTruthy();
+
+      // Provider A streamed a frame (headersSent flipped); provider B was
+      // never contacted because the guard short-circuited even though the
+      // error was, on its own, retryable.
+      expect(res.headersSent).toBe(true);
+      expect(res.writes.join("")).toContain("partial-from-a");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[0]?.[0]).toMatch(/^http:\/\/a\//);
+    } finally {
+      restore();
+    }
   });
 });

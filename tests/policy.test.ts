@@ -251,6 +251,7 @@ describe("resolveRoute", () => {
       {
         id: "expensive",
         kind: "anthropic-sdk" as const,
+        protocols: ["chat_completions" as const],
         models: [
           { id: "claude-sonnet-4-6", costInputUsdPerMTok: 3, costOutputUsdPerMTok: 15 },
         ],
@@ -260,6 +261,7 @@ describe("resolveRoute", () => {
       {
         id: "cheap",
         kind: "openai-compatible" as const,
+        protocols: ["chat_completions" as const],
         models: [
           { id: "claude-sonnet-4-6", costInputUsdPerMTok: 2, costOutputUsdPerMTok: 10 },
         ],
@@ -297,6 +299,7 @@ describe("resolveRoute", () => {
       {
         id: "only-one",
         kind: "anthropic-sdk" as const,
+        protocols: ["chat_completions" as const],
         models: [{ id: "claude-sonnet-4-6" }],
         call: async () => ({} as any),
         stream: async () => {},
