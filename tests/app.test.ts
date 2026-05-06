@@ -78,7 +78,7 @@ describe("createApp", () => {
     expect(res.body.choices?.[0]?.message?.content).toContain("resolved=gpt-4o-mini");
   });
 
-  it("redacts prompt preview span attr by default in production", async () => {
+  it("redacts prompt preview span attr by default when disabled", async () => {
     const previousNodeEnv = config.nodeEnv;
     const previousTracePreview = config.tracePromptPreviewEnabled;
     const previousRedactedValue = config.tracePromptPreviewRedactedValue;
@@ -110,6 +110,44 @@ describe("createApp", () => {
     config.nodeEnv = previousNodeEnv;
     config.tracePromptPreviewEnabled = previousTracePreview;
     config.tracePromptPreviewRedactedValue = previousRedactedValue;
+  });
+
+  it("sanitizes prompt preview when explicitly enabled", async () => {
+    const previousTracePreview = config.tracePromptPreviewEnabled;
+    config.tracePromptPreviewEnabled = true;
+
+    const tracing = await import("../src/tracing.js");
+    const spanSpy = vi.spyOn(tracing, "setSpanAttrs");
+
+    const res = await request(app)
+      .post("/v1/chat/completions")
+      .send({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content:
+              "email alice@example.com bearer sk-secretvalue1234567890123456 token=abc123 https://example.com/cb?access_token=xyz",
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const calls = spanSpy.mock.calls.map((c) => c[0]);
+    const previewAttr = calls.find(
+      (attrs) => attrs && typeof attrs === "object" && "prov.llm.prompt_preview" in (attrs as Record<string, unknown>),
+    ) as Record<string, unknown> | undefined;
+
+    expect(typeof previewAttr?.["prov.llm.prompt_preview"]).toBe("string");
+    const preview = String(previewAttr?.["prov.llm.prompt_preview"] ?? "");
+    expect(preview).toContain("[redacted-email]");
+    expect(preview).toContain("Bearer [redacted-token]");
+    expect(preview).toContain("token=[redacted]");
+    expect(preview).toContain("access_token=[redacted]");
+    expect(preview).not.toContain("alice@example.com");
+    expect(preview).not.toContain("sk-secretvalue");
+
+    config.tracePromptPreviewEnabled = previousTracePreview;
   });
 
   it("returns OpenAI-compatible SSE chunks when stream=true", async () => {

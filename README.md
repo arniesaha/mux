@@ -134,7 +134,7 @@ curl -s http://localhost:8787/v1/responses \
 | `ANTHROPIC_API_KEY` | — | API key fallback for anthropic-sdk |
 | `ANTHROPIC_BASE_URL` | — | Override Anthropic API URL (supports proxies) |
 | `MUX_ANTHROPIC_PROMPT_CACHE` | `true` | Inject Anthropic ephemeral `cache_control` breakpoints on the translated request (system, tools, history) |
-| `TRACE_PROMPT_PREVIEW_ENABLED` | `true` (dev), `false` (prod) | Enable prompt preview text on tracing span attrs |
+| `TRACE_PROMPT_PREVIEW_ENABLED` | `false` | Enable prompt preview text on tracing span attrs (opt-in; disabled by default for safety) |
 | `TRACE_PROMPT_PREVIEW_REDACTED_VALUE` | `[redacted]` | Value written to trace attrs when prompt preview tracing is disabled |
 
 ## Prompt caching (Anthropic)
