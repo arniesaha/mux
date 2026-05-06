@@ -155,10 +155,26 @@ export class DownstreamRequestError extends Error {
   }
 }
 
+// Network-layer error codes that undici/Node bubble up via `err.cause.code` on
+// a `TypeError("fetch failed", { cause })`. These are transient connection
+// failures where retrying against a different provider can plausibly succeed.
+const RETRYABLE_CAUSE_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
 // Decide whether a downstream failure should trigger cross-provider failover.
 // Retryable: 408/429/5xx from DownstreamRequestError, 401/403 (auth may differ
 // per provider), and network-layer errors (AbortError from our timeout or
-// "fetch failed" from Node's fetch). Non-retryable: 4xx client errors (400,
+// transient connection failures). Non-retryable: 4xx client errors (400,
 // 404, 422) — the request is malformed and won't improve on another provider.
 export const isRetryableDownstreamError = (err: unknown): boolean => {
   if (err instanceof DownstreamRequestError) {
@@ -170,6 +186,13 @@ export const isRetryableDownstreamError = (err: unknown): boolean => {
   }
   if (err instanceof Error) {
     if (err.name === "AbortError") return true;
+    // Authoritative: undici wraps the real network error under `err.cause.code`.
+    const cause = (err as { cause?: { code?: unknown } }).cause;
+    if (cause && typeof cause.code === "string" && RETRYABLE_CAUSE_CODES.has(cause.code)) {
+      return true;
+    }
+    // Fallback: Node 18+ wraps these as TypeError("fetch failed"). Kept for
+    // resilience against future runtime changes that drop `cause.code`.
     if (err.message.toLowerCase().includes("fetch failed")) return true;
   }
   return false;
@@ -711,6 +734,16 @@ const buildProviderChain = (route: RouteDecision): string[] => {
   return [primary, ...fallbacks.slice(0, hops)];
 };
 
+const describeFailoverError = (err: unknown): string => {
+  if (err instanceof DownstreamRequestError) return `status=${err.status}`;
+  if (err instanceof Error) {
+    const cause = (err as { cause?: { code?: unknown } }).cause;
+    if (cause && typeof cause.code === "string") return `${err.name}:${cause.code}`;
+    return err.name;
+  }
+  return "unknown";
+};
+
 const annotateFailoverHop = (
   i: number,
   id: string,
@@ -723,17 +756,17 @@ const annotateFailoverHop = (
     "prov.failover.active_provider": id,
     "prov.route.provider_id": id,
   });
+  const fromId = failedProviders[failedProviders.length - 1];
+  const fromUrl = fromId ? config.providers.find((p) => p.id === fromId)?.baseUrl ?? null : null;
+  const toUrl = config.providers.find((p) => p.id === id)?.baseUrl ?? null;
   downstreamLogger.warn({
     event: "mux.failover_hop",
-    from: failedProviders[failedProviders.length - 1],
+    from: fromId,
+    fromUrl,
     to: id,
+    toUrl,
     attempt: i,
-    reason:
-      lastError instanceof DownstreamRequestError
-        ? `status=${lastError.status}`
-        : lastError instanceof Error
-          ? lastError.name
-          : "unknown",
+    reason: describeFailoverError(lastError),
   });
 };
 
