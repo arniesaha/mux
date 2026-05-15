@@ -4,6 +4,7 @@ import { setSpanAttrs, withLlmSpan } from "../tracing.js";
 import { computeCostUsd, resolveCallerAgentId } from "./cost.js";
 import type { ChatCompletionsRequest, ResponsesRequest, RouteDecision } from "../types.js";
 import {
+  buildAgentweaveHeaders,
   buildMockResponse,
   buildMockResponsesResponse,
   DownstreamRequestError,
@@ -99,6 +100,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const headers: Record<string, string> = {
         "content-type": "application/json",
         ...(cfg.extraHeaders ?? {}),
+        ...buildAgentweaveHeaders(context),
       };
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
@@ -183,6 +185,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
       const headers: Record<string, string> = {
         "content-type": "application/json",
         ...(cfg.extraHeaders ?? {}),
+        ...buildAgentweaveHeaders(context),
       };
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
@@ -237,6 +240,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
         "content-type": "application/json",
         accept: "text/event-stream",
         ...(cfg.extraHeaders ?? {}),
+        ...buildAgentweaveHeaders(context),
       };
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;
@@ -308,6 +312,7 @@ export const createOpenAICompatibleProvider = (cfg: ProviderConfig): Provider =>
         "content-type": "application/json",
         accept: "text/event-stream",
         ...(cfg.extraHeaders ?? {}),
+        ...buildAgentweaveHeaders(context),
       };
       const auth = resolveAuthHeaderForProvider(cfg, context);
       if (auth) headers[auth.header] = auth.value;

@@ -4,6 +4,7 @@ import { config } from "../src/config.js";
 import {
   __resetAnthropicClientForTests,
   callDownstream,
+  callResponsesDownstream,
   DownstreamNotConfiguredError,
   DownstreamRequestError,
   anthropicStopReasonToOpenAI,
@@ -11,12 +12,13 @@ import {
   isRetryableDownstreamError,
   streamAnthropicToOpenAI,
   streamDownstream,
+  streamResponsesDownstream,
   toAnthropicInput,
   toOpenAIResponse,
   translateToolChoiceToAnthropic,
   translateToolsToAnthropic,
 } from "../src/downstream.js";
-import type { ChatCompletionsRequest, OpenAIToolDef, RouteDecision } from "../src/types.js";
+import type { ChatCompletionsRequest, OpenAIToolDef, ResponsesRequest, RouteDecision } from "../src/types.js";
 
 const requestPayload: ChatCompletionsRequest = {
   model: "gpt-4o",
@@ -2751,6 +2753,166 @@ describe("streamDownstream — headers-sent guard with retryable mid-stream erro
       expect(res.writes.join("")).toContain("partial-from-a");
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(fetchSpy.mock.calls[0]?.[0]).toMatch(/^http:\/\/a\//);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("openai-compatible — AgentWeave header propagation", () => {
+  const setupProvider = (protocols: Array<"chat_completions" | "responses"> = ["chat_completions", "responses"]) => {
+    const previousProviders = config.providers;
+    config.providers = [
+      {
+        id: "agentweave-codex",
+        kind: "openai-compatible",
+        baseUrl: "http://proxy.test/v1",
+        protocols,
+        auth: { mode: "passthrough" },
+        models: [{ id: "gpt-4o-mini", costInputUsdPerMTok: 0.1, costOutputUsdPerMTok: 0.4 }],
+      },
+    ];
+    __resetAnthropicClientForTests();
+    return () => {
+      config.providers = previousProviders;
+      __resetAnthropicClientForTests();
+    };
+  };
+
+  const routeFor = (protocol: "chat_completions" | "responses"): RouteDecision => ({
+    requestedModel: "gpt-4o-mini",
+    resolvedModel: "gpt-4o-mini",
+    routeReason: "test",
+    provider: "openai-compatible",
+    backendTarget: "http://proxy.test/v1",
+    providerId: "agentweave-codex",
+    fallbackProviderIds: [],
+    protocol,
+  });
+
+  const callerHeaders = {
+    "x-agentweave-agent-id": "nix-v1",
+    "x-agentweave-session-id": "nix-main",
+    "x-agentweave-project": "nix",
+    "x-agentweave-agent-type": "main",
+  };
+
+  const okChatResponse = () =>
+    new Response(
+      JSON.stringify({
+        id: "x", object: "chat.completion", created: 1, model: "gpt-4o-mini",
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  const okResponsesResponse = () =>
+    new Response(
+      JSON.stringify({ id: "r1", object: "response", model: "gpt-4o-mini", output: [] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  const trivialSseResponse = () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+
+  // Minimal stub matching the surface used by the openai-compatible adapter
+  // when streaming. We don't validate the stream itself — only that fetch was
+  // invoked with the expected headers.
+  const makeStreamRes = () => {
+    const res = {
+      statusCode: 0,
+      headersSent: false,
+      headers: {} as Record<string, string>,
+      writes: [] as string[],
+      ended: false,
+      _listeners: {} as Record<string, Array<() => void>>,
+      status(code: number) { res.statusCode = code; return res; },
+      setHeader(k: string, v: string) { res.headers[k] = v; },
+      getHeader(k: string) { return res.headers[k]; },
+      write(chunk: string) { res.headersSent = true; res.writes.push(chunk); return true; },
+      end() { res.ended = true; },
+      once(_event: string, _cb: () => void) {},
+      off(_event: string, _cb: () => void) {},
+      emit(_event: string) {},
+    };
+    return res;
+  };
+
+  const assertAgentweaveHeaders = (headers: Record<string, string>) => {
+    expect(headers["x-agentweave-agent-id"]).toBe("nix-v1");
+    expect(headers["x-agentweave-session-id"]).toBe("nix-main");
+    expect(headers["x-agentweave-project"]).toBe("nix");
+    expect(headers["x-agentweave-agent-type"]).toBe("main");
+  };
+
+  it("call (chat) forwards x-agentweave-* headers to the downstream", async () => {
+    const restore = setupProvider();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okChatResponse());
+      await callDownstream(requestPayload, routeFor("chat_completions"), {
+        agentweaveHeaders: callerHeaders,
+      });
+      const headers = (fetchSpy.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+      assertAgentweaveHeaders(headers);
+    } finally {
+      restore();
+    }
+  });
+
+  it("stream (chat) forwards x-agentweave-* headers to the downstream", async () => {
+    const restore = setupProvider();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(trivialSseResponse());
+      const res = makeStreamRes();
+      await streamDownstream(
+        { ...requestPayload, stream: true },
+        routeFor("chat_completions"),
+        res as unknown as import("express").Response,
+        { agentweaveHeaders: callerHeaders },
+      );
+      const headers = (fetchSpy.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+      assertAgentweaveHeaders(headers);
+    } finally {
+      restore();
+    }
+  });
+
+  it("callResponses forwards x-agentweave-* headers to the downstream", async () => {
+    const restore = setupProvider();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponsesResponse());
+      const responsesReq: ResponsesRequest = { model: "gpt-4o-mini", input: "hi" };
+      await callResponsesDownstream(responsesReq, routeFor("responses"), {
+        agentweaveHeaders: callerHeaders,
+      });
+      const headers = (fetchSpy.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+      assertAgentweaveHeaders(headers);
+    } finally {
+      restore();
+    }
+  });
+
+  it("streamResponses forwards x-agentweave-* headers to the downstream", async () => {
+    const restore = setupProvider();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(trivialSseResponse());
+      const responsesReq: ResponsesRequest = { model: "gpt-4o-mini", input: "hi", stream: true };
+      const res = makeStreamRes();
+      await streamResponsesDownstream(
+        responsesReq,
+        routeFor("responses"),
+        res as unknown as import("express").Response,
+        { agentweaveHeaders: callerHeaders },
+      );
+      const headers = (fetchSpy.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+      assertAgentweaveHeaders(headers);
     } finally {
       restore();
     }

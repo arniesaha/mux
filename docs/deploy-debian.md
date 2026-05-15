@@ -225,9 +225,20 @@ completes.
 
 ## Plumbing with OpenClaw + AgentWeave
 
+The canonical chain on this NAS deploy is:
+
 ```
-OpenClaw agent ─► AgentWeave proxy ─► Mux ─► LiteLLM/Anthropic/OpenAI
+OpenClaw agent ─► Mux ─► AgentWeave proxy ─► LiteLLM/Anthropic/OpenAI
 ```
+
+Mux is the policy/routing layer in front of the AgentWeave proxy.
+OpenClaw sends to Mux; Mux's per-provider `baseUrl` points at the
+AgentWeave proxy NodePort; the proxy in turn forwards to the real
+upstream and emits OTel spans to Tempo.
+
+(The inverted chain — OpenClaw → AgentWeave proxy → Mux → upstream — is
+also supported by the Mux code, but the NAS today uses the topology
+above. Pick one and document which.)
 
 ### OpenClaw → Mux
 
@@ -251,19 +262,27 @@ landing on Mux's `/v1/responses` and `/v1/chat/completions`.
 > back to `api.openai.com` / `chatgpt.com` and bypass Mux entirely. Make
 > sure the OpenClaw build is at or after that commit.
 
-### AgentWeave → Mux
+### Mux → AgentWeave proxy
 
-If routing through AgentWeave's Python proxy first, point its upstream at
-Mux and use:
+For each provider entry in Mux's `PROVIDERS` (or the legacy
+`DOWNSTREAM_BASE_URL`), set `baseUrl` to the AgentWeave proxy NodePort:
 
-```ini
-DOWNSTREAM_AUTH_MODE=passthrough
+```jsonc
+{
+  "id": "agentweave-anthropic",
+  "kind": "anthropic-sdk",
+  "baseUrl": "http://192.168.1.70:30400",
+  "auth": { "mode": "anthropic-oauth", "oauthToken": "sk-ant-oat01-..." },
+  "models": [ /* … */ ]
+}
 ```
 
-so Mux forwards the inbound `Authorization` header to the eventual
-downstream. AgentWeave PR #183 reroutes `/v1/responses` calls carrying
-ChatGPT-mode JWTs to `chatgpt.com/backend-api/codex/responses` — that
-rewrite happens inside AgentWeave's proxy and is independent of Mux.
+Use `auth.mode = "passthrough"` (openai-compatible) when OpenClaw is
+already supplying an end-to-end JWT (Codex ChatGPT-mode) and you don't
+want Mux to rewrite the header. AgentWeave PR #183 reroutes
+`/v1/responses` calls carrying ChatGPT-mode JWTs to
+`chatgpt.com/backend-api/codex/responses` — that rewrite happens inside
+AgentWeave's proxy and is independent of Mux.
 
 ### Caller agent attribution
 
