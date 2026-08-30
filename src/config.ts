@@ -3,7 +3,11 @@ import dotenv from "dotenv";
 import type { ProviderConfig, ProviderKind } from "./providers/types.js";
 import type { RequestProtocol, RoutingRule } from "./types.js";
 
-dotenv.config();
+// Skip loading .env during test runs so the vitest suite stays hermetic.
+// Tests that require specific env values set them on process.env themselves.
+if (process.env.VITEST !== "true") {
+  dotenv.config();
+}
 
 type DownstreamAuthMode = "none" | "bearer" | "x-api-key" | "passthrough";
 type DownstreamMode = "openai-compatible" | "anthropic-sdk";

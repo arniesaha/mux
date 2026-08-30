@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+// Hoisted mock: intercept every import("dotenv") in this test file.
+const dotenvMock = { config: vi.fn() };
+vi.mock("dotenv", () => dotenvMock);
 
 type EnvMap = Record<string, string | undefined>;
 
@@ -95,5 +99,22 @@ describe("startup config validation", () => {
         ]),
       }),
     ).rejects.toThrow(/responses/);
+  });
+});
+
+describe("dotenv regression", () => {
+  beforeEach(() => {
+    dotenvMock.config.mockReset();
+  });
+
+  it("does not call dotenv.config under VITEST=true", async () => {
+    // Dynamic import with a nonce forces a fresh module evaluation.
+    // config.ts guards `dotenv.config()` behind `VITEST !== "true"`,
+    // and Vitest sets `process.env.VITEST === "true"` at startup.
+    const nonce = `regression-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const modPath = new URL(`../src/config.ts?${nonce}`, import.meta.url).href;
+    await import(modPath);
+
+    expect(dotenvMock.config).not.toHaveBeenCalled();
   });
 });
